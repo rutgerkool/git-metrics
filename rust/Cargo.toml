@@ -1,0 +1,23 @@
+[package]
+name = "git_metrics"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "Rust library for Git repository analysis"
+
+[lib]
+name = "git_metrics"
+crate-type = ["cdylib"]
+
+[dependencies]
+git2 = "0.17"
+pyo3 = { version = "0.19", features = ["extension-module"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+rayon = "1.6"
+dirs = "5.0"
+md5 = "0.7"
+log = "0.4"
+thiserror = "1.0"
+anyhow = "1.0"

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel", "setuptools-rust>=1.5.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "git-metrics"
+version = "0.1.0"
+description = "Git repository metrics and analysis tool"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = [
+    "networkx>=2.6.3",
+    "matplotlib>=3.5.1",
+    "numpy>=1.22.0",
+    "tabulate>=0.8.9",
+    "typer>=0.9.0",
+    "rich>=13.4.2",
+]
+
+[project.scripts]
+git-metrics = "git_metrics.cli:app"
+
+[tool.setuptools]
+packages = { find = { where = ["src"] } }
+package-dir = { "" = "src" }
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]

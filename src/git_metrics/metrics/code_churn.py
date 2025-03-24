@@ -1,5 +1,5 @@
 from collections import defaultdict
-from plugin_interface import MetricPlugin
+from git_metrics.plugins.interface import MetricPlugin
 
 class CodeChurnMetric(MetricPlugin):
     
