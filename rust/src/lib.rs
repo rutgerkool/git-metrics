@@ -20,17 +20,24 @@ struct RustGitCollector {
     repo_path: String,
     max_commits: Option<u32>,
     since_days: Option<u32>,
+    file_patterns: Vec<String>,
 }
 
 #[pymethods]
 impl RustGitCollector {
     #[new]
-    #[pyo3(signature = (repo_path = ".", max_commits = None, since_days = None))]
-    fn new(repo_path: &str, max_commits: Option<u32>, since_days: Option<u32>) -> Self {
+    #[pyo3(signature = (repo_path = ".", max_commits = None, since_days = None, file_patterns = None))]
+    fn new(
+        repo_path: &str, 
+        max_commits: Option<u32>, 
+        since_days: Option<u32>,
+        file_patterns: Option<Vec<String>>
+    ) -> Self {
         RustGitCollector {
             repo_path: repo_path.to_string(),
             max_commits,
             since_days,
+            file_patterns: file_patterns.unwrap_or_else(Vec::new),
         }
     }
 
@@ -38,7 +45,8 @@ impl RustGitCollector {
         let collector = GitCollector::new(
             &self.repo_path, 
             self.max_commits, 
-            self.since_days
+            self.since_days,
+            self.file_patterns.clone()
         );
         
         match collector.collect_history() {
@@ -57,7 +65,12 @@ impl RustGitCollector {
     }
 
     fn get_current_changes(&self, py: Python) -> PyResult<PyObject> {
-        let collector = GitCollector::new(&self.repo_path, None, None);
+        let collector = GitCollector::new(
+            &self.repo_path, 
+            None, 
+            None,
+            self.file_patterns.clone()
+        );
         
         match collector.get_current_changes() {
             Ok(changes) => {
@@ -82,7 +95,7 @@ impl RustGitCollector {
     }
 
     fn clear_cache(&self) -> PyResult<()> {
-        let collector = GitCollector::new(&self.repo_path, None, None);
+        let collector = GitCollector::new(&self.repo_path, None, None, Vec::new());
         collector.clear_cache().map_err(|err| {
             PyRuntimeError::new_err(format!("Failed to clear cache: {}", err))
         })

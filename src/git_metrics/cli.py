@@ -37,6 +37,9 @@ def show_metrics(
     since_days: Optional[int] = typer.Option(
         None, "--since-days", help="Analyze commits from the last N days"
     ),
+    file_patterns: Optional[List[str]] = typer.Option(
+        None, "--files", "-f", help="File patterns to filter (e.g. '*.py', 'src/*')"
+    ),
     use_python: bool = typer.Option(
         False, "--use-python", help="Force using Python implementation instead of Rust"
     ),
@@ -55,6 +58,7 @@ def show_metrics(
         max_commits=max_commits,
         since_days=since_days,
         use_python=use_python,
+        file_patterns=file_patterns,
     )
     
     if clear_cache:
@@ -83,6 +87,8 @@ def show_metrics(
         repo_summary.add_row("[bold cyan]Commit limit:", f"[white]{max_commits}")
     if since_days:
         repo_summary.add_row("[bold cyan]Time range:", f"[white]Last {since_days} days")
+    if file_patterns:
+        repo_summary.add_row("[bold cyan]File patterns:", f"[white]{', '.join(file_patterns)}")
     
     console.print(Panel(repo_summary, title="Repository Analysis", border_style="blue"))
     
@@ -105,6 +111,9 @@ def analyze_impact(
     since_days: Optional[int] = typer.Option(
         None, "--since-days", help="Analyze commits from the last N days"
     ),
+    file_patterns: Optional[List[str]] = typer.Option(
+        None, "--files", "-f", help="File patterns to filter (e.g. '*.py', 'src/*')"
+    ),
     use_python: bool = typer.Option(
         False, "--use-python", help="Force using Python implementation instead of Rust"
     ),
@@ -120,6 +129,7 @@ def analyze_impact(
         max_commits=max_commits,
         since_days=since_days,
         use_python=use_python,
+        file_patterns=file_patterns,
     )
     
     with Progress(

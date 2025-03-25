@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 use rayon::prelude::*;
+use regex::Regex;
 
 use crate::error::{GitMetricsError, Result};
 use crate::models::{Commit, FileChange};
@@ -13,10 +14,16 @@ pub struct GitCollector {
     max_commits: Option<u32>,
     since_days: Option<u32>,
     cache_dir: PathBuf,
+    file_patterns: Vec<String>,
 }
 
 impl GitCollector {
-    pub fn new(repo_path: &str, max_commits: Option<u32>, since_days: Option<u32>) -> Self {
+    pub fn new(
+        repo_path: &str, 
+        max_commits: Option<u32>, 
+        since_days: Option<u32>,
+        file_patterns: Vec<String>
+    ) -> Self {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let cache_dir = home_dir.join(".git_metrics_cache");
         
@@ -29,6 +36,7 @@ impl GitCollector {
             max_commits,
             since_days,
             cache_dir,
+            file_patterns,
         }
     }
     
@@ -46,10 +54,17 @@ impl GitCollector {
             None => "all".to_string(),
         };
         
-        let key_str = format!("{}_{}_{}", 
+        let patterns_str = if self.file_patterns.is_empty() {
+            "all".to_string()
+        } else {
+            self.file_patterns.join(",")
+        };
+        
+        let key_str = format!("{}_{}_{}_{}",
             repo_abs_path.display(),
             max_commits_str, 
-            since_days_str
+            since_days_str,
+            patterns_str
         );
         
         let digest = md5::compute(key_str.as_bytes());
@@ -139,21 +154,27 @@ impl GitCollector {
             return Ok(commits);
         }
         
+        let pattern_str = if self.file_patterns.is_empty() {
+            "all files".to_string()
+        } else {
+            format!("files matching: {}", self.file_patterns.join(", "))
+        };
+        
         let _limit_msg = match (self.max_commits, self.since_days) {
             (None, None) => {
-                println!("Collecting entire git history (all commits)...");
+                println!("Collecting entire git history ({})...", pattern_str);
                 "all".to_string()
             },
             (Some(max), Some(days)) => {
-                println!("Collecting git history (limited to {} commits from the last {} days)...", max, days);
+                println!("Collecting git history (limited to {} commits from the last {} days, {})...", max, days, pattern_str);
                 format!("limited to {} commits from the last {} days", max, days)
             },
             (Some(max), None) => {
-                println!("Collecting git history (limited to {} commits)...", max);
+                println!("Collecting git history (limited to {} commits, {})...", max, pattern_str);
                 format!("limited to {} commits", max)
             },
             (None, Some(days)) => {
-                println!("Collecting git history (from the last {} days)...", days);
+                println!("Collecting git history (from the last {} days, {})...", days, pattern_str);
                 format!("from the last {} days", days)
             },
         };
@@ -191,13 +212,49 @@ impl GitCollector {
         let total_commits = raw_commits.len();
         println!("Found {} commits, processing in parallel...", total_commits);
         
+        let has_file_filters = !self.file_patterns.is_empty();
+        
         let commits: Vec<Commit> = raw_commits.par_iter()
             .filter_map(|commit_data| {
                 self.parse_single_commit(commit_data).ok()
             })
+            .filter(|commit| {
+                if has_file_filters {
+                    !commit.files.is_empty()
+                } else {
+                    true
+                }
+            })
             .collect();
         
         Ok(commits)
+    }
+    
+    fn matches_file_pattern(&self, filename: &str) -> bool {
+        if self.file_patterns.is_empty() {
+            return true;
+        }
+        
+        for pattern in &self.file_patterns {
+            if pattern.starts_with("*.") && filename.ends_with(&pattern[1..]) {
+                return true;
+            }
+            else if pattern.contains("*") {
+                let regex_pattern = pattern
+                    .replace(".", "\\.")
+                    .replace("*", ".*");
+                if let Ok(regex) = Regex::new(&regex_pattern) {
+                    if regex.is_match(filename) {
+                        return true;
+                    }
+                }
+            }
+            else if filename == pattern {
+                return true;
+            }
+        }
+        
+        false
     }
     
     fn parse_single_commit(&self, commit_data: &str) -> Result<Commit> {
@@ -226,6 +283,10 @@ impl GitCollector {
             if parts.len() >= 2 {
                 let status_str = parts[0].to_string();
                 let filename = parts[1].to_string();
+                
+                if !self.matches_file_pattern(&filename) {
+                    continue;
+                }
                 
                 let (additions, deletions) = if status_str.starts_with('A') {
                     (1, 0)
@@ -274,6 +335,11 @@ impl GitCollector {
             let parts: Vec<&str> = line.split("|").collect();
             if parts.len() == 2 {
                 let filename = parts[0].trim().to_string();
+                
+                if !self.matches_file_pattern(&filename) {
+                    continue;
+                }
+                
                 let stats = parts[1].trim().to_string();
                 
                 let mut insertions = 0;

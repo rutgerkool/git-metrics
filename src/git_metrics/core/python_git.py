@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -15,10 +16,12 @@ class GitPythonCollector:
         repo_path: str = ".",
         max_commits: Optional[int] = None,
         since_days: Optional[int] = None,
+        file_patterns: Optional[List[str]] = None,
     ):
         self.repo_path = repo_path
         self.max_commits = max_commits
         self.since_days = since_days
+        self.file_patterns = file_patterns or []
         self.cache_dir = os.path.join(os.path.expanduser("~"), ".git_metrics_cache")
         
         if not os.path.exists(self.cache_dir):
@@ -30,7 +33,9 @@ class GitPythonCollector:
         max_commits_str = "all" if self.max_commits is None else str(self.max_commits)
         since_days_str = "all" if self.since_days is None else str(self.since_days)
         
-        key_str = f"{repo_abs_path}_{max_commits_str}_{since_days_str}"
+        patterns_str = "all" if not self.file_patterns else ",".join(self.file_patterns)
+        
+        key_str = f"{repo_abs_path}_{max_commits_str}_{since_days_str}_{patterns_str}"
         return hashlib.md5(key_str.encode()).hexdigest()
     
     def get_cache_file_path(self) -> str:
@@ -104,8 +109,10 @@ class GitPythonCollector:
         if cached_commits is not None:
             return cached_commits
         
+        pattern_str = "all files" if not self.file_patterns else f"files matching: {', '.join(self.file_patterns)}"
+        
         if self.max_commits is None and self.since_days is None:
-            print("Collecting entire git history (all commits)...")
+            print(f"Collecting entire git history ({pattern_str})...")
             limit_msg = "all"
         else:
             limit_parts = []
@@ -114,10 +121,13 @@ class GitPythonCollector:
             if self.since_days is not None:
                 limit_parts.append(f"from the last {self.since_days} days")
             limit_msg = " ".join(limit_parts)
-            print(f"Collecting git history ({limit_msg})...")
+            print(f"Collecting git history ({limit_msg}, {pattern_str})...")
         
         all_commit_data = self.fetch_commits_batch()
         commits = self.parse_commit_data(all_commit_data)
+        
+        if self.file_patterns:
+            commits = [commit for commit in commits if commit["files"]]
         
         print(f"\nCollected {len(commits)} commits")
         
@@ -139,6 +149,22 @@ class GitPythonCollector:
             cmd_parts.append(f"-n {self.max_commits}")
             
         return self.run_git_command(" ".join(cmd_parts))
+    
+    def matches_file_pattern(self, filename: str) -> bool:
+        if not self.file_patterns:
+            return True
+        
+        for pattern in self.file_patterns:
+            if pattern.startswith("*.") and filename.endswith(pattern[1:]):
+                return True
+            elif "*" in pattern:
+                regex_pattern = pattern.replace(".", "\\.").replace("*", ".*")
+                if re.match(regex_pattern, filename):
+                    return True
+            elif filename == pattern:
+                return True
+        
+        return False
     
     def parse_commit_data(self, data: str) -> List[Dict[str, Any]]:
         commits = []
@@ -181,6 +207,8 @@ class GitPythonCollector:
     def _parse_commits_chunk(self, commits_chunk: List[str]) -> List[Dict[str, Any]]:
         result = []
         
+        has_file_filters = bool(self.file_patterns)
+        
         for commit_data in commits_chunk:
             lines = commit_data.split("\n")
             
@@ -206,6 +234,9 @@ class GitPythonCollector:
                         status = parts[0]
                         filename = parts[1]
                         
+                        if not self.matches_file_pattern(filename):
+                            continue
+                        
                         if status.startswith("A"):
                             additions, deletions = 1, 0
                         elif status.startswith("D"):
@@ -220,13 +251,14 @@ class GitPythonCollector:
                             "deletions": deletions
                         })
                 
-                result.append({
-                    "hash": commit_hash,
-                    "author": author,
-                    "date": date,
-                    "message": message,
-                    "files": files
-                })
+                if not has_file_filters or files:
+                    result.append({
+                        "hash": commit_hash,
+                        "author": author,
+                        "date": date,
+                        "message": message,
+                        "files": files
+                    })
         
         return result
     
@@ -252,6 +284,10 @@ class GitPythonCollector:
                 parts = line.split("|")
                 if len(parts) == 2:
                     filename = parts[0].strip()
+                    
+                    if not self.matches_file_pattern(filename):
+                        continue
+                    
                     stats_part = parts[1].strip()
 
                     stats_parts = stats_part.split()

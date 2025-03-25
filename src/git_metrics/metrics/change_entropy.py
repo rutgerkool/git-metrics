@@ -1,6 +1,6 @@
 import math
 from collections import defaultdict
-from typing import Dict, List, Any, DefaultDict, Set
+from typing import Dict, List, Any, DefaultDict, Set, Optional
 
 from git_metrics.plugins.interface import MetricPlugin
 
@@ -101,7 +101,39 @@ class ChangeEntropyMetric(MetricPlugin):
         
         return impact
     
-    def display_result(self, result: Dict[str, Dict[str, Any]], limit: int = 10) -> None:
+    def display_result(self, result: Dict[str, Dict[str, Any]], limit: int = 10, console: Optional[Any] = None) -> None:
+        if console is None:
+            self._print_result(result, limit)
+            return
+            
+        from rich.table import Table
+        from rich import box
+            
+        table = Table(
+            title="Change Entropy Analysis",
+            box=box.ROUNDED,
+            title_style="bold blue",
+            border_style="blue"
+        )
+        
+        table.add_column("Rank", justify="right", style="cyan", width=5)
+        table.add_column("File", style="blue")
+        table.add_column("Entropy", justify="right", style="magenta")
+        table.add_column("Contributors", justify="right", style="yellow")
+        table.add_column("Changes", justify="right")
+        
+        for i, (filename, data) in enumerate(list(result.items())[:limit]):
+            table.add_row(
+                f"#{i+1}",
+                filename,
+                f"{data['entropy']:.2f}",
+                str(data['contributors']),
+                str(data['total_changes'])
+            )
+        
+        console.print(table)
+    
+    def _print_result(self, result: Dict[str, Dict[str, Any]], limit: int = 10) -> None:
         print(f"\n=== {self.name} ===")
         print(f"\nTop {limit} files by change entropy:")
         
@@ -112,7 +144,32 @@ class ChangeEntropyMetric(MetricPlugin):
             print(f"   Contributors: {data['contributors']}")
             print(f"   Total Changes: {data['total_changes']}")
     
-    def display_impact(self, impact: Dict[str, Dict[str, Any]]) -> None:
+    def display_impact(self, impact: Dict[str, Dict[str, Any]], console: Optional[Any] = None) -> None:
+        if console is None:
+            self._print_impact(impact)
+            return
+            
+        from rich.panel import Panel
+            
+        has_insights = False
+        insights_text = []
+        
+        for filename, data in impact.items():
+            insights = data.get("research_backed_insights", [])
+            if insights:
+                has_insights = True
+                insights_text.append(f"[bold blue]{filename}[/bold blue]")
+                for insight in insights:
+                    insights_text.append(f"  * {insight['finding']}")
+                    insights_text.append(f"    [green]RECOMMENDATION:[/green] {insight['recommendation']}")
+                insights_text.append("")
+        
+        if has_insights:
+            console.print(Panel("\n".join(insights_text), title="Change Entropy Impact Analysis", border_style="yellow"))
+        else:
+            console.print(Panel("No entropy impacts identified.", title="Change Entropy Impact Analysis", border_style="yellow"))
+    
+    def _print_impact(self, impact: Dict[str, Dict[str, Any]]) -> None:
         print(f"\n=== {self.name} Impact Analysis ===")
         
         has_insights = False

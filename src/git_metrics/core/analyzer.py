@@ -20,24 +20,28 @@ class GitAnalyzer:
         max_commits: Optional[int] = None,
         since_days: Optional[int] = None,
         use_python: bool = False,
+        file_patterns: Optional[List[str]] = None,
     ):
         self.repo_path = repo_path
         self.max_commits = max_commits
         self.since_days = since_days
         self.use_python = use_python
+        self.file_patterns = file_patterns or []
         
         if RUST_AVAILABLE and not use_python:
             self.collector = git_metrics.RustGitCollector(
                 repo_path=repo_path,
                 max_commits=max_commits,
-                since_days=since_days
+                since_days=since_days,
+                file_patterns=self.file_patterns
             )
             print("Using Rust implementation for Git operations")
         else:
             self.collector = GitPythonCollector(
                 repo_path=repo_path,
                 max_commits=max_commits,
-                since_days=since_days
+                since_days=since_days,
+                file_patterns=self.file_patterns
             )
             print("Using Python implementation for Git operations")
     

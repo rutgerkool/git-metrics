@@ -36,6 +36,7 @@ The tool implements metrics based on established software engineering research:
 - **High Performance**: Core operations implemented in Rust for speed
 - **Interactive Visualizations**: Clear representation of complex metrics
 - **CLI Interface**: Integrate with your existing workflows and tools
+- **File Filtering**: Analyze specific file types or patterns (e.g., only *.cs files in a C# project)
 
 ## Installation
 
@@ -62,8 +63,14 @@ python build.py
 # Run full metrics analysis on the current repository
 git-metrics metrics
 
+# Analyze only specific file types
+git-metrics metrics --files "*.py" "src/*"
+
 # Analyze the potential impact of current uncommitted changes
 git-metrics impact
+
+# Analyze impact for specific file types
+git-metrics impact --files "*.js"
 
 # List available metric plugins
 git-metrics plugins
@@ -89,6 +96,9 @@ git-metrics metrics --use-python
 
 # Clear the cache for fresh analysis
 git-metrics metrics --clear-cache
+
+# Filter analysis to specific file patterns
+git-metrics metrics --files "*.cs" "Controllers/*" "Models/*"
 
 # Verbose output for debugging
 git-metrics metrics --verbose
