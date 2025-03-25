@@ -1,8 +1,14 @@
 from collections import defaultdict
 from itertools import combinations
-from typing import Dict, List, Any, Tuple, DefaultDict, Set
+from typing import Dict, List, Any, Tuple, DefaultDict, Set, Optional
 
 import networkx as nx
+from rich.table import Table
+from rich import box
+from rich.panel import Panel
+from rich.tree import Tree
+from rich.text import Text
+from rich.progress_bar import ProgressBar
 
 from git_metrics.plugins.interface import MetricPlugin
 
@@ -81,49 +87,112 @@ class ChangeCouplingMetric(MetricPlugin):
         
         for filename in modified_files:
             impact[filename] = {
-                "research_backed_insights": [],
-                "coupled_files_modified": [],
-                "coupled_files_unmodified": []
+                "metrics": {},
+                "coupled_files": {
+                    "modified": [],
+                    "unmodified": []
+                }
             }
             
             if filename not in metric_result["file_changes"]:
                 impact[filename]["new_file"] = True
                 continue
             
+            max_coupling = 0
+            avg_coupling = 0
+            coupling_count = 0
+            
             for pair, data in coupling_data.items():
                 if filename in pair:
                     other_file = pair[0] if pair[1] == filename else pair[1]
                     coupling_strength = data["jaccard"]
                     
+                    max_coupling = max(max_coupling, coupling_strength)
+                    avg_coupling += coupling_strength
+                    coupling_count += 1
+                    
                     if other_file in modified_files:
-                        impact[filename]["coupled_files_modified"].append({
+                        impact[filename]["coupled_files"]["modified"].append({
                             "file": other_file,
-                            "strength": coupling_strength
+                            "strength": coupling_strength,
+                            "count": data["count"]
                         })
                     else:
-                        impact[filename]["coupled_files_unmodified"].append({
+                        impact[filename]["coupled_files"]["unmodified"].append({
                             "file": other_file,
-                            "strength": coupling_strength
+                            "strength": coupling_strength,
+                            "count": data["count"]
                         })
+                        
+            impact[filename]["coupled_files"]["modified"].sort(key=lambda x: x["strength"], reverse=True)
+            impact[filename]["coupled_files"]["unmodified"].sort(key=lambda x: x["strength"], reverse=True)
             
-            impact[filename]["coupled_files_modified"].sort(key=lambda x: x["strength"], reverse=True)
-            impact[filename]["coupled_files_unmodified"].sort(key=lambda x: x["strength"], reverse=True)
+            avg_coupling = avg_coupling / coupling_count if coupling_count > 0 else 0
+            strong_unmodified = sum(1 for f in impact[filename]["coupled_files"]["unmodified"] if f["strength"] > 0.5)
             
-            strong_unmodified = [f for f in impact[filename]["coupled_files_unmodified"] if f["strength"] > 0.7]
-            if strong_unmodified:
-                top_coupled = strong_unmodified[:3]
-                files_str = ", ".join([f"{f['file']} ({f['strength']:.2f})" for f in top_coupled])
-                
-                insight = {
-                    "metric": "Change Coupling (D'Ambros et al., 2009)",
-                    "finding": f"These files are frequently changed with {filename} but are NOT in your current changes: {files_str}",
-                    "recommendation": "Consider if these files also need changes to maintain consistency."
-                }
-                impact[filename]["research_backed_insights"].append(insight)
+            impact[filename]["metrics"] = {
+                "max_coupling": max_coupling,
+                "avg_coupling": avg_coupling,
+                "total_coupled_files": coupling_count,
+                "modified_coupled_files": len(impact[filename]["coupled_files"]["modified"]),
+                "unmodified_coupled_files": len(impact[filename]["coupled_files"]["unmodified"]),
+                "strong_unmodified": strong_unmodified,
+                "risk_level": self._calculate_risk_level(max_coupling, strong_unmodified)
+            }
         
         return impact
     
-    def display_result(self, result: Dict[str, Any], limit: int = 10) -> None:
+    def _calculate_risk_level(self, max_coupling, strong_unmodified):
+        if max_coupling > 0.8 and strong_unmodified > 0:
+            return "critical"
+        elif max_coupling > 0.7 and strong_unmodified > 0:
+            return "high"
+        elif max_coupling > 0.5 or strong_unmodified > 1:
+            return "medium"
+        elif max_coupling > 0.3:
+            return "elevated"
+        else:
+            return "low"
+    
+    def display_result(self, result: Dict[str, Any], limit: int = 10, console: Optional[Any] = None) -> None:
+        if console is None:
+            self._print_result(result, limit)
+            return
+        
+        coupling_data = result["coupling"]
+        
+        table = Table(
+            title="File Coupling Analysis",
+            box=box.ROUNDED,
+            title_style="bold blue",
+            border_style="blue"
+        )
+        
+        table.add_column("Rank", justify="right", style="cyan", width=5)
+        table.add_column("File Pair", style="blue")
+        table.add_column("Coupling", justify="right", style="magenta")
+        table.add_column("Co-Changes", justify="right", style="green")
+        table.add_column("Strength", width=30)
+        
+        for i, (pair, data) in enumerate(list(coupling_data.items())[:limit]):
+            file1, file2 = pair
+            
+            short_file1 = file1.split("/")[-1]
+            short_file2 = file2.split("/")[-1]
+            
+            bar = ProgressBar(total=100, completed=int(data["jaccard"] * 100), width=30)
+            
+            table.add_row(
+                f"#{i+1}",
+                f"{short_file1} ↔ {short_file2}",
+                f"{data['jaccard']:.2f}",
+                str(data["count"]),
+                bar
+            )
+        
+        console.print(table)
+    
+    def _print_result(self, result: Dict[str, Any], limit: int = 10) -> None:
         print(f"\n=== {self.name} ===")
         print(f"\nTop {limit} strongest file couplings:")
         
@@ -132,18 +201,118 @@ class ChangeCouplingMetric(MetricPlugin):
             print(f"{i+1}. {pair[0]} ↔ {pair[1]}: {data['jaccard']:.2f}")
             print(f"   Co-changed {data['count']} times")
     
-    def display_impact(self, impact: Dict[str, Dict[str, Any]]) -> None:
+    def display_impact(self, impact: Dict[str, Dict[str, Any]], console: Optional[Any] = None) -> None:
+        if console is None:
+            self._print_impact(impact)
+            return
+        
+        panel = Panel(
+            "[bold]File Coupling Impact Analysis[/bold]", 
+            border_style="yellow",
+            title_align="left"
+        )
+        console.print(panel)
+        
+        for filename, data in impact.items():
+            if data.get("new_file", False):
+                file_panel = Panel(
+                    f"[bold green]NEW FILE[/bold green]",
+                    title=f"[blue]{filename}[/blue]",
+                    border_style="green",
+                    width=100
+                )
+                console.print(file_panel)
+                continue
+                
+            if "metrics" not in data or "coupled_files" not in data:
+                continue
+                
+            metrics = data["metrics"]
+            coupled_modified = data["coupled_files"]["modified"]
+            coupled_unmodified = data["coupled_files"]["unmodified"]
+            
+            risk = metrics.get("risk_level", "low")
+            risk_style = {
+                "critical": "[bold red]CRITICAL[/bold red]",
+                "high": "[red]HIGH[/red]",
+                "medium": "[yellow]MEDIUM[/yellow]",
+                "elevated": "[yellow]ELEVATED[/yellow]",
+                "low": "[green]LOW[/green]"
+            }.get(risk, "[green]LOW[/green]")
+            
+            metrics_table = Table(box=None, show_header=False, padding=(0, 1))
+            metrics_table.add_column(style="cyan")
+            metrics_table.add_column()
+            
+            metrics_table.add_row("Max Coupling:", f"{metrics.get('max_coupling', 0):.2f}")
+            metrics_table.add_row("Avg Coupling:", f"{metrics.get('avg_coupling', 0):.2f}")
+            metrics_table.add_row("Coupled Files:", f"{metrics.get('total_coupled_files', 0)}")
+            metrics_table.add_row("Risk Level:", risk_style)
+            
+            modified_table = None
+            if coupled_modified:
+                modified_table = Table(box=box.SIMPLE, title="Modified Coupled Files")
+                modified_table.add_column("File", style="blue")
+                modified_table.add_column("Strength", justify="right", style="magenta")
+                modified_table.add_column("Co-Changes", justify="right", style="green")
+                
+                for couple in coupled_modified[:5]:
+                    modified_table.add_row(
+                        couple["file"].split("/")[-1],
+                        f"{couple['strength']:.2f}",
+                        str(couple["count"])
+                    )
+            
+            unmodified_table = None
+            if coupled_unmodified:
+                unmodified_table = Table(box=box.SIMPLE, title="Unmodified Coupled Files")
+                unmodified_table.add_column("File", style="blue")
+                unmodified_table.add_column("Strength", justify="right", style="magenta")
+                unmodified_table.add_column("Co-Changes", justify="right", style="green")
+                
+                for couple in coupled_unmodified[:5]:
+                    unmodified_table.add_row(
+                        couple["file"].split("/")[-1],
+                        f"{couple['strength']:.2f}",
+                        str(couple["count"])
+                    )
+            
+            content_parts = [metrics_table]
+            if modified_table:
+                content_parts.append("")
+                content_parts.append(modified_table)
+            if unmodified_table:
+                content_parts.append("")
+                content_parts.append(unmodified_table)
+                
+            file_panel = Panel(
+                "\n".join(str(part) for part in content_parts),
+                title=f"[blue]{filename}[/blue]",
+                border_style="yellow",
+                width=100
+            )
+            console.print(file_panel)
+            console.print()
+    
+    def _print_impact(self, impact: Dict[str, Dict[str, Any]]) -> None:
         print(f"\n=== {self.name} Impact Analysis ===")
         
-        has_insights = False
         for filename, data in impact.items():
-            insights = data.get("research_backed_insights", [])
-            if insights:
-                has_insights = True
+            if "metrics" in data:
+                metrics = data["metrics"]
                 print(f"\nFile: {filename}")
-                for insight in insights:
-                    print(f"  * {insight['finding']}")
-                    print(f"    RECOMMENDATION: {insight['recommendation']}")
-        
-        if not has_insights:
-            print("No coupling impacts identified.\n")
+                print(f"  Max coupling: {metrics.get('max_coupling', 0):.2f}")
+                print(f"  Total coupled files: {metrics.get('total_coupled_files', 0)}")
+                
+                modified = data["coupled_files"]["modified"]
+                unmodified = data["coupled_files"]["unmodified"]
+                
+                if modified:
+                    print("  Modified coupled files:")
+                    for couple in modified[:3]:
+                        print(f"    - {couple['file']} ({couple['strength']:.2f})")
+                
+                if unmodified:
+                    print("  Unmodified coupled files:")
+                    for couple in unmodified[:3]:
+                        print(f"    - {couple['file']} ({couple['strength']:.2f})")

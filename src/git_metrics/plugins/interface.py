@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 class MetricPlugin(ABC):
@@ -53,22 +53,24 @@ class MetricPlugin(ABC):
         pass
     
     @abstractmethod
-    def display_result(self, result: Any, limit: int = 10) -> None:
+    def display_result(self, result: Any, limit: int = 10, console: Optional[Any] = None) -> None:
         """
         Display the metric result in a human-readable format.
         
         Args:
             result: The metric result from calculate()
             limit: Maximum number of items to display
+            console: Rich console object for enhanced display (if None, use print)
         """
         pass
     
     @abstractmethod
-    def display_impact(self, impact: Any) -> None:
+    def display_impact(self, impact: Any, console: Optional[Any] = None) -> None:
         """
         Display the impact analysis in a human-readable format.
         
         Args:
             impact: The impact analysis from analyze_impact()
+            console: Rich console object for enhanced display (if None, use print)
         """
         pass

@@ -101,22 +101,20 @@ class PluginManager:
         
         return impact_results
     
-    def display_metrics(self, results: Dict[str, Any], limit: int = 10) -> None:
+    def display_metrics(self, results: Dict[str, Any], limit: int = 10, console: Optional[Any] = None) -> None:
         for plugin_id, result in results.items():
             if plugin_id in self.active_plugins and result is not None:
                 plugin = self.active_plugins[plugin_id]
                 try:
-                    plugin.display_result(result, limit)
+                    plugin.display_result(result, limit, console=console)
                 except Exception as e:
                     print(f"Error displaying results for {plugin.name}: {e}")
     
-    def display_impact(self, impact_results: Dict[str, Any]) -> None:
-        print("\n=== Impact analysis of current changes ===")
-        
+    def display_impact(self, impact_results: Dict[str, Any], console: Optional[Any] = None) -> None:
         for plugin_id, impact in impact_results.items():
             if plugin_id in self.active_plugins and impact is not None:
                 plugin = self.active_plugins[plugin_id]
                 try:
-                    plugin.display_impact(impact)
+                    plugin.display_impact(impact, console=console)
                 except Exception as e:
                     print(f"Error displaying impact for {plugin.name}: {e}")

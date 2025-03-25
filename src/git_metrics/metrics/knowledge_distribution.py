@@ -1,5 +1,13 @@
 from collections import defaultdict
-from typing import Dict, List, Any, DefaultDict, Set
+from typing import Dict, List, Any, DefaultDict, Set, Optional
+
+from rich.table import Table
+from rich import box
+from rich.panel import Panel
+from rich.progress_bar import ProgressBar
+from rich.text import Text
+from rich.layout import Layout
+from rich.console import Console
 
 from git_metrics.plugins.interface import MetricPlugin
 
@@ -93,7 +101,9 @@ class KnowledgeDistributionMetric(MetricPlugin):
             "bus_factor": self._calculate_bus_factor(sorted_knowledge),
             "knowledge_redundancy": self._calculate_knowledge_redundancy(all_files, file_authors),
             "authors": sorted_knowledge,
-            "file_ownership": file_ownership
+            "file_ownership": file_ownership,
+            "file_count": len(all_files),
+            "author_count": len(all_authors)
         }
         
         return team_metrics
@@ -128,53 +138,164 @@ class KnowledgeDistributionMetric(MetricPlugin):
         self, current_changes: Dict[str, Dict[str, Any]], metric_result: Dict[str, Any]
     ) -> Dict[str, Any]:
         impact = {
-            "team_impact": [],
-            "file_impact": {}
+            "team_metrics": {},
+            "file_metrics": {}
         }
         
         modified_files = list(current_changes.keys())
         
-        bus_factor = metric_result["bus_factor"]
-        if bus_factor <= 2:
-            insight = {
-                "metric": "Knowledge Distribution (Mockus, 2010)",
-                "finding": f"Team has a low bus factor of {bus_factor}. The loss of {bus_factor} key developers " +
-                         "would impact more than 50% of the codebase.",
-                "recommendation": "Consider knowledge sharing sessions and pair programming to reduce key-person risk."
-            }
-            impact["team_impact"].append(insight)
+        team_metrics = {
+            "bus_factor": metric_result["bus_factor"],
+            "knowledge_redundancy": metric_result["knowledge_redundancy"],
+            "file_count": metric_result["file_count"],
+            "author_count": metric_result["author_count"],
+            "risk_level": self._calculate_team_risk_level(metric_result["bus_factor"], metric_result["knowledge_redundancy"])
+        }
+        impact["team_metrics"] = team_metrics
         
         file_ownership = metric_result.get("file_ownership", {})
+        authors = metric_result.get("authors", {})
         
         for filename in modified_files:
-            impact["file_impact"][filename] = {
-                "research_backed_insights": []
+            impact["file_metrics"][filename] = {
+                "metrics": {}
             }
             
             if filename not in file_ownership:
+                impact["file_metrics"][filename]["new_file"] = True
                 continue
             
-            most_knowledgeable = None
-            highest_ownership = 0
+            dominant_author = file_ownership[filename]["dominant_author"]
+            ownership_ratio = file_ownership[filename]["ownership_ratio"]
+            contributor_count = file_ownership[filename]["contributor_count"]
             
-            for author, data in metric_result["authors"].items():
-                author_files = data.get("owned_files", [])
-                if author_files and filename in file_ownership and file_ownership[filename]["dominant_author"] == author:
-                    most_knowledgeable = author
-                    highest_ownership = file_ownership[filename]["ownership_ratio"]
-                    break
+            author_data = authors.get(dominant_author, {})
+            knowledge_depth = author_data.get("depth", 0)
+            knowledge_coverage = author_data.get("coverage", 0)
             
-            if most_knowledgeable and highest_ownership > 0.7:
-                insight = {
-                    "metric": "Knowledge Distribution (Mockus, 2010)",
-                    "finding": f"{most_knowledgeable} has concentrated knowledge of this file ({highest_ownership*100:.0f}%).",
-                    "recommendation": "Consider consulting with this developer or pair programming to ensure quality."
-                }
-                impact["file_impact"][filename]["research_backed_insights"].append(insight)
+            impact["file_metrics"][filename]["metrics"] = {
+                "dominant_author": dominant_author,
+                "ownership_ratio": ownership_ratio,
+                "contributor_count": contributor_count,
+                "author_knowledge_depth": knowledge_depth,
+                "author_knowledge_coverage": knowledge_coverage,
+                "knowledge_risk": self._calculate_knowledge_risk(ownership_ratio, contributor_count, knowledge_depth)
+            }
         
         return impact
     
-    def display_result(self, result: Dict[str, Any], limit: int = 5) -> None:
+    def _calculate_team_risk_level(self, bus_factor, redundancy):
+        if bus_factor <= 1:
+            return "critical"
+        elif bus_factor <= 2:
+            return "high"
+        elif redundancy < 1.5:
+            return "medium"
+        elif bus_factor <= 3:
+            return "elevated"
+        else:
+            return "low"
+    
+    def _calculate_knowledge_risk(self, ownership_ratio, contributor_count, knowledge_depth):
+        if ownership_ratio > 0.9 and contributor_count == 1 and knowledge_depth > 0.8:
+            return "critical"
+        elif ownership_ratio > 0.8 and contributor_count <= 2:
+            return "high"
+        elif contributor_count < 3 or ownership_ratio > 0.7:
+            return "medium"
+        elif contributor_count < 4:
+            return "elevated"
+        else:
+            return "low"
+    
+    def display_result(self, result: Dict[str, Any], limit: int = 5, console: Optional[Any] = None) -> None:
+        if console is None:
+            self._print_result(result, limit)
+            return
+        
+        team_table = Table(
+            title="Team Knowledge Distribution",
+            box=box.ROUNDED,
+            title_style="bold blue",
+            border_style="blue"
+        )
+        
+        team_table.add_column("Metric", style="cyan")
+        team_table.add_column("Value", style="green")
+        team_table.add_column("Description", style="yellow")
+        
+        bus_factor = result["bus_factor"]
+        knowledge_redundancy = result["knowledge_redundancy"]
+        
+        bus_factor_style = "green"
+        if bus_factor <= 1:
+            bus_factor_style = "bold red"
+        elif bus_factor <= 2:
+            bus_factor_style = "red"
+        elif bus_factor <= 3:
+            bus_factor_style = "yellow"
+            
+        team_table.add_row(
+            "Bus Factor",
+            f"[{bus_factor_style}]{bus_factor}[/{bus_factor_style}]",
+            "Number of developers whose absence would risk project stalling"
+        )
+        
+        redundancy_style = "green"
+        if knowledge_redundancy < 1.2:
+            redundancy_style = "red"
+        elif knowledge_redundancy < 1.5:
+            redundancy_style = "yellow"
+            
+        team_table.add_row(
+            "Knowledge Redundancy",
+            f"[{redundancy_style}]{knowledge_redundancy:.2f}[/{redundancy_style}]",
+            "Average number of developers familiar with each file"
+        )
+        
+        team_table.add_row(
+            "Files",
+            str(result.get("file_count", 0)),
+            "Total files in repository"
+        )
+        
+        team_table.add_row(
+            "Contributors",
+            str(result.get("author_count", 0)),
+            "Total contributors to repository"
+        )
+        
+        console.print(team_table)
+        console.print()
+        
+        knowledge_table = Table(
+            title="Developer Knowledge Distribution",
+            box=box.ROUNDED,
+            title_style="bold blue", 
+            border_style="blue"
+        )
+        
+        knowledge_table.add_column("Rank", justify="right", style="cyan", width=5)
+        knowledge_table.add_column("Developer", style="blue")
+        knowledge_table.add_column("Coverage", justify="right", style="green")
+        knowledge_table.add_column("Depth", justify="right", style="yellow")
+        knowledge_table.add_column("Owned Files", justify="right", style="magenta")
+        knowledge_table.add_column("Commits", justify="right")
+        
+        authors = result.get("authors", {})
+        for i, (author, data) in enumerate(list(authors.items())[:limit]):
+            knowledge_table.add_row(
+                f"#{i+1}",
+                author,
+                f"{data['coverage']*100:.1f}%",
+                f"{data['depth']*100:.1f}%",
+                str(data['owned_files']),
+                str(data['commit_count'])
+            )
+        
+        console.print(knowledge_table)
+    
+    def _print_result(self, result: Dict[str, Any], limit: int = 5) -> None:
         print(f"\n=== {self.name} ===")
         
         print("\nTeam-level metrics:")
@@ -191,25 +312,122 @@ class KnowledgeDistributionMetric(MetricPlugin):
             print(f"   Bus Factor Contribution: {data['bus_factor_contribution']*100:.1f}% of codebase owned")
             print(f"   Activity: {data['commit_count']} commits, {data['files_changed']} files changed")
     
-    def display_impact(self, impact: Dict[str, Any]) -> None:
+    def display_impact(self, impact: Dict[str, Any], console: Optional[Any] = None) -> None:
+        if console is None:
+            self._print_impact(impact)
+            return
+        
+        team_metrics = impact.get("team_metrics", {})
+        bus_factor = team_metrics.get("bus_factor", 0)
+        redundancy = team_metrics.get("knowledge_redundancy", 0)
+        risk_level = team_metrics.get("risk_level", "unknown")
+        
+        risk_style = {
+            "critical": "[bold red]CRITICAL[/bold red]",
+            "high": "[red]HIGH[/red]",
+            "medium": "[yellow]MEDIUM[/yellow]",
+            "elevated": "[yellow]ELEVATED[/yellow]",
+            "low": "[green]LOW[/green]"
+        }.get(risk_level, "[grey]UNKNOWN[/grey]")
+        
+        team_table = Table(
+            title="Team Knowledge Impact",
+            box=box.ROUNDED,
+            title_style="bold yellow",
+            border_style="yellow"
+        )
+        
+        team_table.add_column("Metric", style="cyan")
+        team_table.add_column("Value", style="green")
+        team_table.add_column("Risk Level", style="yellow")
+        
+        team_table.add_row(
+            "Bus Factor",
+            f"{bus_factor}",
+            risk_style
+        )
+        
+        team_table.add_row(
+            "Knowledge Redundancy",
+            f"{redundancy:.2f}",
+            ""
+        )
+        
+        console.print(team_table)
+        console.print()
+        
+        file_metrics = impact.get("file_metrics", {})
+        
+        if not file_metrics:
+            console.print(Panel("No knowledge distribution impact data to display", border_style="yellow"))
+            return
+        
+        file_table = Table(
+            title="Knowledge Distribution Impact per File",
+            box=box.ROUNDED,
+            title_style="bold yellow",
+            border_style="yellow"
+        )
+        
+        file_table.add_column("File", style="blue")
+        file_table.add_column("Owner", style="green")
+        file_table.add_column("Ownership", justify="right", style="magenta")
+        file_table.add_column("Contributors", justify="right", style="cyan")
+        file_table.add_column("Risk Level", justify="center")
+        
+        has_entries = False
+        for filename, data in file_metrics.items():
+            if data.get("new_file", False):
+                file_table.add_row(
+                    filename,
+                    "None",
+                    "N/A",
+                    "N/A",
+                    "[bold green]NEW FILE[/bold green]"
+                )
+                has_entries = True
+            elif "metrics" in data:
+                metrics = data["metrics"]
+                risk = metrics.get("knowledge_risk", "unknown")
+                
+                risk_style = {
+                    "critical": "[bold red]CRITICAL[/bold red]",
+                    "high": "[red]HIGH[/red]",
+                    "medium": "[yellow]MEDIUM[/yellow]",
+                    "elevated": "[yellow]ELEVATED[/yellow]",
+                    "low": "[green]LOW[/green]"
+                }.get(risk, "[grey]UNKNOWN[/grey]")
+                
+                file_table.add_row(
+                    filename,
+                    metrics.get("dominant_author", "Unknown"),
+                    f"{metrics.get('ownership_ratio', 0)*100:.1f}%",
+                    str(metrics.get("contributor_count", 0)),
+                    risk_style
+                )
+                has_entries = True
+        
+        if has_entries:
+            console.print(file_table)
+    
+    def _print_impact(self, impact: Dict[str, Any]) -> None:
         print(f"\n=== {self.name} Impact Analysis ===")
         
-        team_insights = impact.get("team_impact", [])
-        if team_insights:
-            print("\nTeam-level insights:")
-            for insight in team_insights:
-                print(f"  * {insight['finding']}")
-                print(f"    RECOMMENDATION: {insight['recommendation']}")
+        team_metrics = impact.get("team_metrics", {})
+        if team_metrics:
+            print("\nTeam-level metrics:")
+            print(f"  Bus Factor: {team_metrics.get('bus_factor', 0)}")
+            print(f"  Knowledge Redundancy: {team_metrics.get('knowledge_redundancy', 0):.2f}")
+            print(f"  Risk Level: {team_metrics.get('risk_level', 'unknown').upper()}")
         
-        has_file_insights = False
-        for filename, data in impact.get("file_impact", {}).items():
-            insights = data.get("research_backed_insights", [])
-            if insights:
-                has_file_insights = True
-                print(f"\nFile: {filename}")
-                for insight in insights:
-                    print(f"  * {insight['finding']}")
-                    print(f"    RECOMMENDATION: {insight['recommendation']}")
-        
-        if not team_insights and not has_file_insights:
-            print("No knowledge distribution impacts identified.\n")
+        file_metrics = impact.get("file_metrics", {})
+        if file_metrics:
+            print("\nFile-level metrics:")
+            for filename, data in file_metrics.items():
+                if "metrics" in data:
+                    metrics = data["metrics"]
+                    print(f"\n  File: {filename}")
+                    print(f"    Owner: {metrics.get('dominant_author', 'Unknown')}")
+                    print(f"    Ownership: {metrics.get('ownership_ratio', 0)*100:.1f}%")
+                    print(f"    Contributors: {metrics.get('contributor_count', 0)}")
+                    print(f"    Risk Level: {metrics.get('knowledge_risk', 'unknown').upper()}")

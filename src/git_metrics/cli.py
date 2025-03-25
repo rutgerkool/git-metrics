@@ -4,6 +4,11 @@ from typing import List, Optional
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
+from rich.tree import Tree
+from rich.text import Text
 
 from git_metrics.core.analyzer import GitAnalyzer
 from git_metrics.plugins.manager import PluginManager
@@ -43,7 +48,6 @@ def show_metrics(
     ),
 ):
     plugin_manager = PluginManager()
-    plugin_manager.discover_plugins()
     plugin_manager.activate_plugins(metrics)
     
     analyzer = GitAnalyzer(
@@ -72,11 +76,19 @@ def show_metrics(
         progress.add_task("Collecting git history...", total=None)
         commits = analyzer.collect_history()
     
-    console.print(f"[bold]Total number of commits collected:[/bold] {len(commits)}")
+    repo_summary = Table.grid(padding=(0, 1))
+    repo_summary.add_row("[bold cyan]Repository:", f"[white]{repo}")
+    repo_summary.add_row("[bold cyan]Commits analyzed:", f"[white]{len(commits)}")
+    if max_commits:
+        repo_summary.add_row("[bold cyan]Commit limit:", f"[white]{max_commits}")
+    if since_days:
+        repo_summary.add_row("[bold cyan]Time range:", f"[white]Last {since_days} days")
+    
+    console.print(Panel(repo_summary, title="Repository Analysis", border_style="blue"))
     
     metrics_result = plugin_manager.calculate_metrics(commits)
     
-    plugin_manager.display_metrics(metrics_result, limit)
+    plugin_manager.display_metrics(metrics_result, limit, console=console)
 
 
 @app.command("impact")
@@ -101,7 +113,6 @@ def analyze_impact(
     ),
 ):
     plugin_manager = PluginManager()
-    plugin_manager.discover_plugins()
     plugin_manager.activate_plugins(metrics)
     
     analyzer = GitAnalyzer(
@@ -119,8 +130,6 @@ def analyze_impact(
         progress.add_task("Collecting git history...", total=None)
         commits = analyzer.collect_history()
     
-    console.print(f"[bold]Total number of commits collected:[/bold] {len(commits)}")
-    
     metrics_result = plugin_manager.calculate_metrics(commits)
     
     with Progress(
@@ -135,9 +144,29 @@ def analyze_impact(
         console.print("\n[yellow]No uncommitted changes found.[/yellow]")
         return
     
+    changes_table = Table(title="Current Changes", box=box.ROUNDED, border_style="yellow")
+    changes_table.add_column("File", style="blue")
+    changes_table.add_column("Additions", justify="right", style="green")
+    changes_table.add_column("Deletions", justify="right", style="red")
+    changes_table.add_column("Total", justify="right")
+    
+    for filename, stats in current_changes.items():
+        additions = stats.get("additions", 0)
+        deletions = stats.get("deletions", 0)
+        total = stats.get("total", additions + deletions)
+        changes_table.add_row(
+            filename,
+            f"+{additions}",
+            f"-{deletions}",
+            str(total)
+        )
+    
+    console.print(changes_table)
+    console.print()
+    
     impact = plugin_manager.analyze_impact(current_changes, metrics_result)
     
-    plugin_manager.display_impact(impact)
+    plugin_manager.display_impact(impact, console=console)
 
 
 @app.command("plugins")
@@ -145,11 +174,16 @@ def list_plugins():
     plugin_manager = PluginManager()
     plugins = plugin_manager.discover_plugins()
     
-    console.print("\n[bold]Available metrics plugins:[/bold]")
+    table = Table(title="Available Metrics Plugins", box=box.ROUNDED, border_style="cyan")
+    table.add_column("ID", style="green")
+    table.add_column("Name", style="blue")
+    table.add_column("Description")
     
     for plugin_id, plugin_class in plugins.items():
         plugin = plugin_class()
-        console.print(f"  [green]{plugin_id}[/green]: {plugin.name} - {plugin.description}")
+        table.add_row(plugin_id, plugin.name, plugin.description)
+    
+    console.print(table)
 
 
 @app.callback()
