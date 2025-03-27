@@ -5,155 +5,107 @@ import os
 import re
 import shutil
 import subprocess
-import time
 from concurrent.futures import ProcessPoolExecutor
-from typing import Dict, List, Any, Optional, Tuple
-
+from typing import Dict, List, Optional, Any, Union, Tuple
 
 class GitPythonCollector:
     def __init__(
         self,
         repo_path: str = ".",
-        max_commits: Optional[int] = None,
+        max_commits: Optional[int] = None, 
         since_days: Optional[int] = None,
-        file_patterns: Optional[List[str]] = None,
+        file_patterns: Optional[List[str]] = None
     ):
         self.repo_path = repo_path
         self.max_commits = max_commits
         self.since_days = since_days
         self.file_patterns = file_patterns or []
         self.cache_dir = os.path.join(os.path.expanduser("~"), ".git_metrics_cache")
-        
-        if not os.path.exists(self.cache_dir):
-            os.makedirs(self.cache_dir)
-    
+        os.makedirs(self.cache_dir, exist_ok=True)
+
     def get_cache_key(self) -> str:
         repo_abs_path = os.path.abspath(self.repo_path)
-        
-        max_commits_str = "all" if self.max_commits is None else str(self.max_commits)
-        since_days_str = "all" if self.since_days is None else str(self.since_days)
-        
-        patterns_str = "all" if not self.file_patterns else ",".join(self.file_patterns)
-        
+        max_commits_str = str(self.max_commits) if self.max_commits else "all"
+        since_days_str = str(self.since_days) if self.since_days else "all"
+        patterns_str = ",".join(self.file_patterns) if self.file_patterns else "all"
         key_str = f"{repo_abs_path}_{max_commits_str}_{since_days_str}_{patterns_str}"
         return hashlib.md5(key_str.encode()).hexdigest()
-    
+
     def get_cache_file_path(self) -> str:
         cache_key = self.get_cache_key()
         return os.path.join(self.cache_dir, f"{cache_key}.json")
-    
+
     def clear_cache(self) -> None:
-        if os.path.exists(self.cache_dir):
-            shutil.rmtree(self.cache_dir)
-            os.makedirs(self.cache_dir)
-    
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
+        os.makedirs(self.cache_dir, exist_ok=True)
+
     def load_from_cache(self) -> Optional[List[Dict[str, Any]]]:
         cache_file = self.get_cache_file_path()
-        
+
         if os.path.exists(cache_file):
-            cache_mtime = os.path.getmtime(cache_file)
-            cache_age = time.time() - cache_mtime
-            
+            cache_age = time.time() - os.path.getmtime(cache_file)
             if cache_age < 86400:
-                try:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        commits = json.load(f)
-                        print(f"Loading git history from cache ({len(commits)} commits)...")
-                        return commits
-                except (json.JSONDecodeError, IOError) as e:
-                    print(f"Cache file corrupted, will rebuild: {e}")
-        
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+
         return None
-    
+
     def save_to_cache(self, commits: List[Dict[str, Any]]) -> None:
         cache_file = self.get_cache_file_path()
-        
-        try:
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(commits, f)
-            print(f"Saved {len(commits)} commits to cache.")
-        except IOError as e:
-            print(f"Warning: Could not save to cache: {str(e)}")
-    
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(commits, f)
+
     def run_git_command(self, command: str) -> str:
         full_command = f"git --no-pager -C {self.repo_path} {command}"
-        
-        env = os.environ.copy()
-        env["GIT_PAGER"] = ""
-        env["PYTHONIOENCODING"] = "utf-8"
-        
+        env = {"GIT_PAGER": "", "PYTHONIOENCODING": "utf-8", **os.environ}
+
         try:
-            process = subprocess.Popen(
+            process = subprocess.run(
                 full_command,
                 shell=True,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                universal_newlines=False,
+                text=True,
+                check=True
             )
-            
-            stdout_bytes, stderr_bytes = process.communicate()
-            
-            if process.returncode != 0:
-                error_msg = stderr_bytes.decode("utf-8", errors="replace")
-                raise Exception(f"Git command failed: {error_msg}")
-            
-            return stdout_bytes.decode("utf-8", errors="replace")
-            
-        except Exception as e:
-            print(f"Error executing Git command: {str(e)}")
-            raise
-    
+            return process.stdout
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr
+            raise Exception(f"Git command failed: {error_msg}") from e
+
     def collect_history(self) -> List[Dict[str, Any]]:
         cached_commits = self.load_from_cache()
-        if cached_commits is not None:
+        if cached_commits:
             return cached_commits
-        
-        pattern_str = "all files" if not self.file_patterns else f"files matching: {', '.join(self.file_patterns)}"
-        
-        if self.max_commits is None and self.since_days is None:
-            print(f"Collecting entire git history ({pattern_str})...")
-            limit_msg = "all"
-        else:
-            limit_parts = []
-            if self.max_commits is not None:
-                limit_parts.append(f"limited to {self.max_commits} commits")
-            if self.since_days is not None:
-                limit_parts.append(f"from the last {self.since_days} days")
-            limit_msg = " ".join(limit_parts)
-            print(f"Collecting git history ({limit_msg}, {pattern_str})...")
-        
+
         all_commit_data = self.fetch_commits_batch()
         commits = self.parse_commit_data(all_commit_data)
-        
+
         if self.file_patterns:
             commits = [commit for commit in commits if commit["files"]]
-        
-        print(f"\nCollected {len(commits)} commits")
-        
+
         self.save_to_cache(commits)
-        
         return commits
-    
+
     def fetch_commits_batch(self) -> str:
         format_str = "--pretty=format:COMMIT_START%n%H%n%an%n%ad%n%s%n%b%nCOMMIT_END"
-        
         cmd_parts = ["log", format_str, "--name-status"]
-        
-        if self.since_days is not None:
+
+        if self.since_days:
             since_date = datetime.datetime.now() - datetime.timedelta(days=self.since_days)
             since_str = since_date.strftime("%Y-%m-%d")
             cmd_parts.append(f'--since="{since_str}"')
-            
-        if self.max_commits is not None:
+
+        if self.max_commits:
             cmd_parts.append(f"-n {self.max_commits}")
-            
+
         return self.run_git_command(" ".join(cmd_parts))
-    
+
     def matches_file_pattern(self, filename: str) -> bool:
         if not self.file_patterns:
             return True
-        
+
         for pattern in self.file_patterns:
             if pattern.startswith("*.") and filename.endswith(pattern[1:]):
                 return True
@@ -163,161 +115,106 @@ class GitPythonCollector:
                     return True
             elif filename == pattern:
                 return True
-        
+
         return False
-    
+
     def parse_commit_data(self, data: str) -> List[Dict[str, Any]]:
-        commits = []
-        
         raw_commits = data.split("COMMIT_START\n")[1:]
-        
-        total_commits = len(raw_commits)
-        print(f"Found {total_commits} commits, processing...")
-        
+
         with ProcessPoolExecutor() as executor:
-            cpu_count = os.cpu_count() or 4
-            chunks = self._split_list(raw_commits, cpu_count)
-            futures = [executor.submit(self._parse_commits_chunk, chunk) for chunk in chunks]
-            
-            commits = []
-            completed = 0
-            for future in ProcessPoolExecutor().map(self._parse_commits_chunk, chunks):
-                commits.extend(future)
-                
-                completed += 1
-                progress = (completed / len(chunks)) * 100
-                print(f"Processed {completed}/{len(chunks)} chunks ({progress:.1f}%)...", end="\r")
-        
-        return commits
-    
-    def _split_list(self, lst: List[Any], num_chunks: int) -> List[List[Any]]:
+            chunks = GitPythonCollector._split_list(raw_commits, os.cpu_count() or 4)
+            return sum(executor.map(self._parse_commits_chunk, chunks), [])
+
+    @staticmethod
+    def _split_list(lst: List[Any], num_chunks: int) -> List[List[Any]]:
         avg = len(lst) // num_chunks
         remainder = len(lst) % num_chunks
-        
         result = []
-        i = 0
-        for _ in range(num_chunks):
-            chunk_size = avg + 1 if remainder > 0 else avg
-            remainder -= 1 if remainder > 0 else 0
-            result.append(lst[i:i+chunk_size])
-            i += chunk_size
-            
+        start = 0
+
+        for i in range(num_chunks):
+            chunk_size = avg + (1 if i < remainder else 0)
+            result.append(lst[start:start + chunk_size])
+            start += chunk_size
+
         return result
-    
+
     def _parse_commits_chunk(self, commits_chunk: List[str]) -> List[Dict[str, Any]]:
         result = []
-        
         has_file_filters = bool(self.file_patterns)
-        
+
         for commit_data in commits_chunk:
-            lines = commit_data.split("\n")
-            
-            if not lines or "COMMIT_END" not in lines:
-                continue
+            lines = commit_data.strip().split("\n")
+            if len(lines) >= 6 and lines[-1] == "COMMIT_END":
+                commit_hash, author, date, message = lines[:4]
+                file_changes = GitPythonCollector._parse_file_changes(lines[4:-1], self.matches_file_pattern)
                 
-            end_index = lines.index("COMMIT_END")
-            
-            if len(lines) >= 4:
-                commit_hash = lines[0]
-                author = lines[1]
-                date = lines[2]
-                message = lines[3]
-                
-                files = []
-                for i in range(4, end_index):
-                    line = lines[i].strip()
-                    if not line:
-                        continue
-                    
-                    parts = line.split("\t")
-                    if len(parts) >= 2:
-                        status = parts[0]
-                        filename = parts[1]
-                        
-                        if not self.matches_file_pattern(filename):
-                            continue
-                        
-                        if status.startswith("A"):
-                            additions, deletions = 1, 0
-                        elif status.startswith("D"):
-                            additions, deletions = 0, 1
-                        else:
-                            additions, deletions = 1, 1
-                        
-                        files.append({
-                            "filename": filename,
-                            "status": status,
-                            "additions": additions,
-                            "deletions": deletions
-                        })
-                
-                if not has_file_filters or files:
+                if not has_file_filters or file_changes:
                     result.append({
                         "hash": commit_hash,
                         "author": author,
                         "date": date,
                         "message": message,
-                        "files": files
+                        "files": file_changes
                     })
-        
-        return result
-    
-    def get_current_changes(self) -> Dict[str, Dict[str, Any]]:
-        print("Analyzing current changes...")
 
+        return result
+
+    @staticmethod
+    def _parse_file_changes(lines: List[str], matches_pattern: str) -> List[Dict[str, Union[str, int]]]:
+        file_changes = []
+
+        for line in lines:
+            parts = line.strip().split("\t")
+            if len(parts) >= 2:
+                status, filename = parts[:2]
+                if matches_pattern(filename):
+                    additions = 1 if status.startswith("A") else 0
+                    deletions = 1 if status.startswith("D") else 0
+                    file_changes.append({
+                        "filename": filename,
+                        "status": status,
+                        "additions": additions,
+                        "deletions": deletions
+                    })
+
+        return file_changes
+
+    def get_current_changes(self) -> Dict[str, Dict[str, Any]]:
         try:
             diff_output = self.run_git_command("diff --stat")
-            print(f"Git diff output: {diff_output}")
         except Exception as e:
             print(f"Error running git diff: {str(e)}")
             return {}
 
         changes = {}
         for line in diff_output.split("\n"):
-            if not line.strip():
-                continue
-                
-            if "file changed" in line or "files changed" in line:
-                continue
-                
-            try:
-                parts = line.split("|")
-                if len(parts) == 2:
-                    filename = parts[0].strip()
-                    
-                    if not self.matches_file_pattern(filename):
-                        continue
-                    
-                    stats_part = parts[1].strip()
-
-                    stats_parts = stats_part.split()
-                    total_changes = int(stats_parts[0]) if stats_parts else 0
-                    
-                    symbols = stats_parts[1] if len(stats_parts) > 1 else ""
-                    insertions = symbols.count("+")
-                    deletions = symbols.count("-")
-                    
-                    if insertions == 0 and deletions == 0:
-                        insertions = total_changes // 2
-                        deletions = total_changes // 2
-                        
-                        if total_changes % 2 == 1:
-                            insertions += 1
-                    
+            parts = line.strip().split("|")
+            if len(parts) == 2:
+                filename, stats_part = map(str.strip, parts)
+                if self.matches_file_pattern(filename):
+                    insertions, deletions = GitPythonCollector._parse_change_stats(stats_part)
                     changes[filename] = {
                         "additions": insertions,
                         "deletions": deletions,
-                        "total": total_changes
-                    }
-            except Exception as e:
-                print(f"Error processing line '{line}': {str(e)}")
-                if "filename" in locals():
-                    changes[filename] = {
-                        "additions": 0,
-                        "deletions": 0,
-                        "total": 0,
-                        "error": True
+                        "total": insertions + deletions
                     }
 
-        print(f"Analyzed {len(changes)} changes")
         return changes
+
+    @staticmethod
+    def _parse_change_stats(stats_part: str) -> Tuple[int, int]:
+        stats_parts = stats_part.split()
+        total_changes = int(stats_parts[0]) if stats_parts else 0
+
+        symbols = stats_parts[1] if len(stats_parts) > 1 else ""
+        insertions = symbols.count("+")
+        deletions = symbols.count("-")
+
+        if insertions == 0 and deletions == 0:
+            insertions = total_changes // 2
+            deletions = total_changes // 2
+            if total_changes % 2 == 1:
+                insertions += 1
+
+        return insertions, deletions
