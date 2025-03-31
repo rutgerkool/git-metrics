@@ -1,4 +1,4 @@
-# Git Commit Analyzer
+# gitsect
 
 A tool for analyzing Git repositories to improve productivity and code quality through research-backed metrics.
 
@@ -31,11 +31,10 @@ The tool implements metrics based on established software engineering research:
 ## Features
 
 - **Repository Analysis**: Comprehensive metrics to identify code quality issues
-- **Impact Assessment**: Evaluate potential risks of current uncommitted changes
-- **Extensible Plugin System**: Add custom metrics through a clean plugin interface
+- **Impact Assessment**: Evaluate potential risks of current changes
+- **Extensible Plugin System**: Add custom metrics through a plugin interface
 - **High Performance**: Core operations implemented in Rust for speed
 - **Interactive Visualizations**: Clear representation of complex metrics
-- **CLI Interface**: Integrate with your existing workflows and tools
 - **File Filtering**: Analyze specific file types or patterns (e.g., only *.cs files in a C# project)
 
 ## Installation
@@ -49,8 +48,8 @@ The tool implements metrics based on established software engineering research:
 ### Setup
 
 ```bash
-git clone https://github.com/yourusername/git-metrics.git
-cd git-metrics
+git clone https://github.com/yourusername/gitsect.git
+cd gitsect
 python build.py
 
 ```
@@ -61,54 +60,48 @@ python build.py
 
 ```bash
 # Run full metrics analysis on the current repository
-git-metrics metrics
+gitsect metrics
 
 # Analyze only specific file types
-git-metrics metrics --files "*.py" "src/*"
+gitsect metrics --files "*.py" "src/*"
 
 # Analyze the potential impact of current uncommitted changes
-git-metrics impact
+gitsect impact
 
 # Analyze impact for specific file types
-git-metrics impact --files "*.js"
+gitsect impact --files "*.js"
 
 # List available metric plugins
-git-metrics plugins
+gitsect plugins
 ```
 
 ### Advanced Options
 
 ```bash
 # Analyze a specific repository
-git-metrics metrics --repo /path/to/repo
+gitsect metrics --repo /path/to/repo
 
 # Limit the number of results displayed
-git-metrics metrics --limit 10
+gitsect metrics --limit 10
 
 # Focus on specific metrics
-git-metrics metrics --metrics code_churn,developer_ownership
+gitsect metrics --metrics code_churn,developer_ownership
 
 # Set time constraints
-git-metrics metrics --since-days 30 --max-commits 1000
+gitsect metrics --since-days 30 --max-commits 1000
 
 # Force using Python implementation instead of Rust
-git-metrics metrics --use-python
+gitsect metrics --use-python
 
-# Clear the cache for fresh analysis
-git-metrics metrics --clear-cache
-
-# Filter analysis to specific file patterns
-git-metrics metrics --files "*.cs" "Controllers/*" "Models/*"
-
-# Verbose output for debugging
-git-metrics metrics --verbose
+# Clear the cache
+gitsect metrics --clear-cache
 ```
 
 ## Extending with Custom Metrics
 
 You can create your own metrics by implementing the `MetricPlugin` interface:
 
-1. Create a new Python file in the `src/git_metrics/metrics/` directory
+1. Create a new Python file in the `src/gitsect/metrics/` directory
 2. Implement the required interface methods:
    - `name` and `description` properties
    - `calculate(commits)` method to compute the metric
@@ -121,5 +114,5 @@ You can create your own metrics by implementing the `MetricPlugin` interface:
 The application is built using a hybrid approach:
 
 - **Rust Core**: High-performance git operations and data collection
-- **Python Frontend**: Flexible CLI interface and metric analysis
+- **Python Frontend**: CLI interface and metric analysis
 - **Plugin System**: Extensible architecture for custom metrics

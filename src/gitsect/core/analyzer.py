@@ -3,7 +3,7 @@ import os
 import sys
 from typing import Dict, List, Optional, Any
 
-from git_metrics.core.python_git import GitPythonCollector
+from gitsect.core.python_git import GitPythonCollector
 
 
 class GitAnalyzer:
@@ -31,8 +31,8 @@ class GitAnalyzer:
         file_patterns: List[str]
     ):
         if not use_python and self._is_rust_available():
-            from git_metrics import git_metrics
-            return git_metrics.RustGitCollector(
+            from gitsect import gitsect
+            return gitsect.RustGitCollector(
                 repo_path=repo_path,
                 max_commits=max_commits,
                 since_days=since_days,
@@ -49,7 +49,7 @@ class GitAnalyzer:
     @staticmethod
     def _is_rust_available() -> bool:
         try:
-            from git_metrics import git_metrics
+            from gitsect import gitsect
             return True
         except ImportError:
             print("Rust implementation not available, using Python fallback")

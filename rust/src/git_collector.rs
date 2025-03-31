@@ -25,7 +25,7 @@ impl GitCollector {
         file_patterns: Vec<String>
     ) -> Self {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let cache_dir = home_dir.join(".git_metrics_cache");
+        let cache_dir = home_dir.join(".gitsect_cache");
         
         if !cache_dir.exists() {
             let _ = fs::create_dir_all(&cache_dir);

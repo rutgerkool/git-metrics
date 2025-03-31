@@ -20,7 +20,7 @@ class GitPythonCollector:
         self.max_commits = max_commits
         self.since_days = since_days
         self.file_patterns = file_patterns or []
-        self.cache_dir = os.path.join(os.path.expanduser("~"), ".git_metrics_cache")
+        self.cache_dir = os.path.join(os.path.expanduser("~"), ".gitsect_cache")
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def get_cache_key(self) -> str:

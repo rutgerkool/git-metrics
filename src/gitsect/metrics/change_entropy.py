@@ -1,9 +1,10 @@
 import math
 from collections import defaultdict
 from typing import Dict, List, Any, DefaultDict, Set, Optional
-
-from git_metrics.plugins.interface import MetricPlugin
-
+from rich import box
+from rich.panel import Panel
+from rich.table import Table
+from gitsect.plugins.interface import MetricPlugin
 
 class ChangeEntropyMetric(MetricPlugin):
     @property
@@ -15,32 +16,35 @@ class ChangeEntropyMetric(MetricPlugin):
         return "Measures the complexity and distribution of changes."
     
     def calculate(self, commits: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        author_changes: DefaultDict[str, DefaultDict[str, int]] = defaultdict(lambda: defaultdict(int))
-        file_authors: DefaultDict[str, Set[str]] = defaultdict(set)
+        author_changes, file_authors = self._extract_author_data(commits)
+        file_entropy = self._calculate_file_entropy(author_changes, file_authors)
+        sorted_entropy = self._sort_entropy_results(file_entropy)
         
+        return sorted_entropy
+
+    def _extract_author_data(self, commits: List[Dict[str, Any]]) -> tuple:
+        author_changes = defaultdict(lambda: defaultdict(int))
+        file_authors = defaultdict(set)
+
         for commit in commits:
             author = commit["author"]
-            
             for file_change in commit["files"]:
                 filename = file_change["filename"]
                 author_changes[filename][author] += 1
                 file_authors[filename].add(author)
-        
-        file_entropy: Dict[str, Dict[str, Any]] = {}
+
+        return author_changes, file_authors
+
+    def _calculate_file_entropy(self, author_changes, file_authors) -> Dict[str, Dict[str, Any]]:
+        file_entropy = {}
         for filename, authors in file_authors.items():
-            author_contributions: Dict[str, int] = {}
-            for author in authors:
-                author_contributions[author] = author_changes[filename][author]
+            author_contributions = {author: author_changes[filename][author] for author in authors}
             
             total = sum(author_contributions.values())
             if total == 0:
                 continue
                 
-            entropy = 0
-            for count in author_contributions.values():
-                p = count / total
-                if p > 0:
-                    entropy -= p * math.log2(p)
+            entropy = self._calculate_entropy(author_contributions.values(), total)
             
             author_count = len(author_contributions)
             max_entropy = math.log2(author_count) if author_count > 0 else 0
@@ -51,64 +55,84 @@ class ChangeEntropyMetric(MetricPlugin):
                 "contributors": author_count,
                 "total_changes": total
             }
-        
-        sorted_entropy = dict(sorted(
+
+        return file_entropy
+
+    def _calculate_entropy(self, contributions: List[int], total: int) -> float:
+        entropy = 0
+        for count in contributions:
+            p = count / total
+            if p > 0:
+                entropy -= p * math.log2(p)
+
+        return entropy
+
+    def _sort_entropy_results(self, file_entropy: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        return dict(sorted(
             file_entropy.items(),
             key=lambda x: x[1]["entropy"],
             reverse=True
         ))
-        
-        return sorted_entropy
     
     def analyze_impact(
         self, current_changes: Dict[str, Dict[str, Any]], metric_result: Dict[str, Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        impact: Dict[str, Dict[str, Any]] = {}
+        impact = {}
         
         for filename, change_data in current_changes.items():
-            impact[filename] = {
-                "research_backed_insights": []
-            }
-            
-            if filename not in metric_result:
-                impact[filename]["new_file"] = True
-                continue
-            
-            entropy_data = metric_result[filename]
-            entropy = entropy_data["entropy"]
-            contributors = entropy_data["contributors"]
-            
-            impact[filename]["change_entropy"] = entropy
-            impact[filename]["contributors"] = contributors
-            
-            if entropy > 0.8 and contributors > 3:
-                insight = {
-                    "metric": "Change Entropy (Hassan, 2009)",
-                    "finding": f"High change entropy ({entropy:.2f}): {contributors} different developers " +
-                              f"have modified this file with no clear ownership pattern.",
-                    "recommendation": "High entropy files need careful code review as they correlate with defects. " +
-                                     "Consider establishing clearer ownership."
-                }
-                impact[filename]["research_backed_insights"].append(insight)
-            elif entropy < 0.3 and contributors > 1:
-                insight = {
-                    "metric": "Change Entropy (Hassan, 2009)",
-                    "finding": f"Low change entropy ({entropy:.2f}) despite {contributors} contributors " +
-                              f"indicates dominant ownership with occasional contributions.",
-                    "recommendation": "Low entropy typically indicates healthier code; maintain this pattern."
-                }
-                impact[filename]["research_backed_insights"].append(insight)
+            impact[filename] = self._analyze_file_impact(filename, metric_result)
         
         return impact
+
+    def _analyze_file_impact(self, filename: str, metric_result: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        impact = {"research_backed_insights": []}
+            
+        if filename not in metric_result:
+            impact["new_file"] = True
+            return impact
+            
+        entropy_data = metric_result[filename]
+        entropy = entropy_data["entropy"]
+        contributors = entropy_data["contributors"]
+        
+        impact["change_entropy"] = entropy
+        impact["contributors"] = contributors
+            
+        insights = self._generate_insights(entropy, contributors)
+        impact["research_backed_insights"].extend(insights)
+
+        return impact
+
+    def _generate_insights(self, entropy: float, contributors: int) -> List[Dict[str, str]]:
+        insights = []
+
+        if entropy > 0.8 and contributors > 3:
+            insights.append({
+                "metric": "Change Entropy (Hassan, 2009)",
+                "finding": f"High change entropy ({entropy:.2f}): {contributors} different developers " +
+                          f"have modified this file with no clear ownership pattern.",
+                "recommendation": "High entropy files need careful code review as they correlate with defects. " +
+                                 "Consider establishing clearer ownership."
+            })
+        elif entropy < 0.3 and contributors > 1:
+            insights.append({
+                "metric": "Change Entropy (Hassan, 2009)",
+                "finding": f"Low change entropy ({entropy:.2f}) despite {contributors} contributors " +
+                          f"indicates dominant ownership with occasional contributions.",
+                "recommendation": "Low entropy typically indicates healthier code; maintain this pattern."
+            })
+
+        return insights
     
     def display_result(self, result: Dict[str, Dict[str, Any]], limit: int = 10, console: Optional[Any] = None) -> None:
         if console is None:
             self._print_result(result, limit)
             return
             
-        from rich.table import Table
-        from rich import box
-            
+        table = self._create_entropy_table(result, limit)
+        console.print(table)
+    
+    def _create_entropy_table(self, result: Dict[str, Dict[str, Any]], limit) -> Table:    
         table = Table(
             title="Change Entropy Analysis",
             box=box.ROUNDED,
@@ -131,14 +155,13 @@ class ChangeEntropyMetric(MetricPlugin):
                 str(data['total_changes'])
             )
         
-        console.print(table)
-    
+        return table
+
     def _print_result(self, result: Dict[str, Dict[str, Any]], limit: int = 10) -> None:
         print(f"\n=== {self.name} ===")
         print(f"\nTop {limit} files by change entropy:")
         
-        items = list(result.items())[:limit]
-        for i, (filename, data) in enumerate(items):
+        for i, (filename, data) in enumerate(list(result.items())[:limit]):
             print(f"{i+1}. {filename}")
             print(f"   Entropy: {data['entropy']:.2f}")
             print(f"   Contributors: {data['contributors']}")
@@ -149,8 +172,9 @@ class ChangeEntropyMetric(MetricPlugin):
             self._print_impact(impact)
             return
             
-        from rich.panel import Panel
-            
+        self._display_impact_panel(impact, console)
+
+    def _display_impact_panel(self, impact: Dict[str, Dict[str, Any]], console: Any) -> None: 
         has_insights = False
         insights_text = []
         

@@ -12,7 +12,7 @@ except ImportError:
 setup(
     rust_extensions=[
         RustExtension(
-            "git_metrics.git_metrics",
+            "gitsect.gitsect",
             path="rust/Cargo.toml",
             binding=Binding.PyO3,
             debug=False,

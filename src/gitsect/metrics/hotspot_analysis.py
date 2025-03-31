@@ -1,12 +1,13 @@
 from collections import defaultdict
-from typing import Dict, List, Any, DefaultDict, Optional
+from typing import Dict, List, Any, DefaultDict, Optional, Tuple
 
-from git_metrics.plugins.interface import MetricPlugin
 from rich.table import Table
 from rich import box
 from rich.panel import Panel
 from rich.text import Text
 from rich.progress_bar import ProgressBar
+
+from gitsect.plugins.interface import MetricPlugin
 
 
 class HotspotAnalysisMetric(MetricPlugin):
@@ -19,19 +20,28 @@ class HotspotAnalysisMetric(MetricPlugin):
         return "Identifies files with both high complexity and change frequency."
     
     def calculate(self, commits: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        file_changes, file_churn = self._calculate_file_metrics(commits)
+        hotspots = self._calculate_hotspots(file_changes, file_churn)
+        sorted_hotspots = dict(sorted(hotspots.items(), key=lambda x: x[1]["score"], reverse=True))
+        return sorted_hotspots
+
+    def _calculate_file_metrics(self, commits: List[Dict[str, Any]]) -> Tuple[DefaultDict[str, int], DefaultDict[str, int]]:
         file_changes: DefaultDict[str, int] = defaultdict(int)
         file_churn: DefaultDict[str, int] = defaultdict(int)
-        
+
         for commit in commits:
             for file_change in commit["files"]:
                 filename = file_change["filename"]
                 additions = file_change["additions"]
                 deletions = file_change["deletions"]
                 churn = additions + deletions
-                
+
                 file_changes[filename] += 1
                 file_churn[filename] += churn
-        
+
+        return file_changes, file_churn
+
+    def _calculate_hotspots(self, file_changes: DefaultDict[str, int], file_churn: DefaultDict[str, int]) -> Dict[str, Dict[str, Any]]:
         hotspots: Dict[str, Dict[str, Any]] = {}
         for filename, changes in file_changes.items():
             if filename in file_churn:
@@ -44,51 +54,45 @@ class HotspotAnalysisMetric(MetricPlugin):
                     "avg_churn": avg_churn,
                     "score": hotspot_score
                 }
-        
-        sorted_hotspots = dict(sorted(
-            hotspots.items(),
-            key=lambda x: x[1]["score"],
-            reverse=True
-        ))
-        
-        return sorted_hotspots
+        return hotspots
     
-    def analyze_impact(
-        self, current_changes: Dict[str, Dict[str, Any]], metric_result: Dict[str, Dict[str, Any]]
-    ) -> Dict[str, Dict[str, Any]]:
+    def analyze_impact(self, current_changes: Dict[str, Dict[str, Any]], metric_result: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         impact: Dict[str, Dict[str, Any]] = {}
-        
+
         for filename, change_data in current_changes.items():
-            impact[filename] = {
-                "metrics": {}
-            }
-            
-            if filename not in metric_result:
-                impact[filename]["new_file"] = True
-                continue
-            
-            hotspot_data = metric_result[filename]
-            score = hotspot_data["score"]
-            current_churn = change_data["total"]
-            
-            all_scores = [h["score"] for h in metric_result.values()]
-            score_percentile = sum(s <= score for s in all_scores) / len(all_scores)
-            
-            relative_change_size = current_churn / hotspot_data["avg_churn"] if hotspot_data["avg_churn"] > 0 else 0
-            
-            impact[filename]["metrics"] = {
-                "hotspot_score": score,
-                "score_percentile": score_percentile,
-                "change_frequency": hotspot_data["changes"],
-                "avg_change_size": hotspot_data["avg_churn"],
-                "current_change_size": current_churn,
-                "relative_change_size": relative_change_size,
-                "risk_level": self._calculate_risk_level(score_percentile, relative_change_size)
-            }
-        
+            impact[filename] = self._analyze_file_impact(filename, change_data, metric_result)
+
+        return impact
+
+    def _analyze_file_impact(self, filename: str, change_data: Dict[str, Any], metric_result: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        impact: Dict[str, Dict[str, Any]] = {"metrics": {}}
+
+        if filename not in metric_result:
+            impact["new_file"] = True
+            return impact
+
+        hotspot_data = metric_result[filename]
+        score = hotspot_data["score"]
+        current_churn = change_data["total"]
+
+        all_scores = [h["score"] for h in metric_result.values()]
+        score_percentile = sum(s <= score for s in all_scores) / len(all_scores)
+
+        relative_change_size = current_churn / hotspot_data["avg_churn"] if hotspot_data["avg_churn"] > 0 else 0
+
+        impact["metrics"] = {
+            "hotspot_score": score,
+            "score_percentile": score_percentile,
+            "change_frequency": hotspot_data["changes"],
+            "avg_change_size": hotspot_data["avg_churn"],
+            "current_change_size": current_churn,
+            "relative_change_size": relative_change_size,
+            "risk_level": self._calculate_risk_level(score_percentile, relative_change_size)
+        }
+
         return impact
     
-    def _calculate_risk_level(self, percentile, relative_size):
+    def _calculate_risk_level(self, percentile: float, relative_size: float) -> str:
         if percentile > 0.9 and relative_size > 1.5:
             return "critical"
         elif percentile > 0.8 or (percentile > 0.7 and relative_size > 1.5):
@@ -103,17 +107,16 @@ class HotspotAnalysisMetric(MetricPlugin):
     def display_result(self, result: Dict[str, Dict[str, Any]], limit: int = 10, console: Optional[Any] = None) -> None:
         if console is None:
             self._print_result(result, limit)
-            return
-        
+        else:
+            self._display_result_table(result, limit, console)
+    
+    def _display_result_table(self, result: Dict[str, Dict[str, Any]], limit: int, console: Any) -> None:
         max_score = max([data["score"] for data in result.values()]) if result else 0
-        
-        table = Table(
-            title=f"Code Hotspots Analysis",
-            box=box.ROUNDED,
-            title_style="bold blue",
-            border_style="blue"
-        )
-        
+        table = self._create_result_table(result, limit, max_score)
+        console.print(table)
+
+    def _create_result_table(self, result: Dict[str, Dict[str, Any]], limit: int, max_score: float) -> Table:
+        table = Table(title="Code Hotspots Analysis", box=box.ROUNDED, title_style="bold blue", border_style="blue")
         table.add_column("Rank", justify="right", style="cyan", width=5)
         table.add_column("File", style="blue")
         table.add_column("Score", justify="right", style="magenta")
@@ -123,9 +126,8 @@ class HotspotAnalysisMetric(MetricPlugin):
         
         for i, (filename, data) in enumerate(list(result.items())[:limit]):
             percentage = data["score"] / max_score if max_score > 0 else 0
-            
             bar = ProgressBar(total=100, completed=int(percentage * 100), width=30)
-            
+
             table.add_row(
                 f"#{i+1}",
                 filename,
@@ -135,7 +137,7 @@ class HotspotAnalysisMetric(MetricPlugin):
                 bar
             )
         
-        console.print(table)
+        return table
     
     def _print_result(self, result: Dict[str, Dict[str, Any]], limit: int = 10) -> None:
         print(f"\n=== {self.name} ===")
@@ -150,64 +152,69 @@ class HotspotAnalysisMetric(MetricPlugin):
     def display_impact(self, impact: Dict[str, Dict[str, Any]], console: Optional[Any] = None) -> None:
         if console is None:
             self._print_impact(impact)
-            return
+        else:
+            self._display_impact_table(impact, console)
+
+    def _display_impact_table(self, impact: Dict[str, Dict[str, Any]], console: Any) -> None:
+        table = self._create_impact_table(impact)
         
-        table = Table(
-            title=f"Hotspot Impact Analysis",
-            box=box.ROUNDED,
-            title_style="bold yellow",
-            border_style="yellow"
-        )
-        
+        if table.rows:
+            console.print(table)
+        else:
+            console.print(Panel("No hotspot impact data to display", border_style="yellow"))
+
+    def _create_impact_table(self, impact: Dict[str, Dict[str, Any]]) -> Table:
+        table = Table(title="Hotspot Impact Analysis", box=box.ROUNDED, title_style="bold yellow", border_style="yellow")
         table.add_column("File", style="blue")
-        table.add_column("Hotspot Score", justify="right", style="magenta")
+        table.add_column("Hotspot Score", justify="right", style="magenta")  
         table.add_column("Percentile", justify="right")
         table.add_column("Avg Size", justify="right", style="cyan")
         table.add_column("Current Size", justify="right", style="green")
         table.add_column("Risk Level", justify="center")
-        
-        has_entries = False
+
         for filename, data in impact.items():
-            if data.get("new_file", False):
-                table.add_row(
-                    filename,
-                    "N/A",
-                    "N/A",
-                    "N/A",
-                    str(data.get("current_change_size", "N/A")),
-                    "[bold green]NEW FILE[/bold green]"
-                )
-                has_entries = True
-            elif "metrics" in data:
-                metrics = data["metrics"]
-                score = metrics.get("hotspot_score", 0)
-                percentile = metrics.get("score_percentile", 0)
-                avg_size = metrics.get("avg_change_size", 0)
-                current_size = metrics.get("current_change_size", 0)
-                risk = metrics.get("risk_level", "low")
-                
-                risk_style = {
-                    "critical": "[bold red]CRITICAL[/bold red]",
-                    "high": "[red]HIGH[/red]",
-                    "medium": "[yellow]MEDIUM[/yellow]",
-                    "elevated": "[yellow]ELEVATED[/yellow]",
-                    "low": "[green]LOW[/green]"
-                }.get(risk, "[green]LOW[/green]")
-                
-                table.add_row(
-                    filename,
-                    f"{score:.1f}",
-                    f"{percentile:.1%}",
-                    f"{avg_size:.1f}",
-                    str(current_size),
-                    risk_style
-                )
-                has_entries = True
+            self._add_impact_table_row(filename, data, table)
         
-        if has_entries:
-            console.print(table)
-        else:
-            console.print(Panel("No hotspot impact data to display", border_style="yellow"))
+        return table
+
+    def _add_impact_table_row(self, filename: str, data: Dict[str, Any], table: Table) -> None:
+        if data.get("new_file", False):
+            table.add_row(
+                filename, 
+                "N/A", 
+                "N/A",
+                "N/A",
+                str(data.get("current_change_size", "N/A")),
+                "[bold green]NEW FILE[/bold green]"
+            )
+        elif "metrics" in data:
+            metrics = data["metrics"]
+            score = metrics.get("hotspot_score", 0)
+            percentile = metrics.get("score_percentile", 0)
+            avg_size = metrics.get("avg_change_size", 0)
+            current_size = metrics.get("current_change_size", 0)
+            risk = metrics.get("risk_level", "low")
+                
+            risk_style = self._get_risk_style(risk)
+                
+            table.add_row(
+                filename,
+                f"{score:.1f}",
+                f"{percentile:.1%}",
+                f"{avg_size:.1f}",
+                str(current_size),
+                risk_style
+            )
+
+    def _get_risk_style(self, risk_level: str) -> str:
+        risk_styles = {
+            "critical": "[bold red]CRITICAL[/bold red]",
+            "high": "[red]HIGH[/red]",
+            "medium": "[yellow]MEDIUM[/yellow]",
+            "elevated": "[yellow]ELEVATED[/yellow]", 
+            "low": "[green]LOW[/green]"
+        }
+        return risk_styles.get(risk_level, "[grey]UNKNOWN[/grey]")
     
     def _print_impact(self, impact: Dict[str, Dict[str, Any]]) -> None:
         print(f"\n=== {self.name} Impact Analysis ===")

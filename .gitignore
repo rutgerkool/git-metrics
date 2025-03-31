@@ -37,7 +37,7 @@ rust/target/
 Cargo.lock
 
 bin/
-.git_metrics_cache/
+.gitsect_cache/
 
 *.whl
 *.tar.gz

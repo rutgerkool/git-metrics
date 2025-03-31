@@ -1,12 +1,12 @@
 [package]
-name = "git_metrics"
+name = "gitsect"
 version = "0.1.0"
 edition = "2021"
 authors = ["Your Name <your.email@example.com>"]
 description = "Rust library for Git repository analysis"
 
 [lib]
-name = "git_metrics"
+name = "gitsect"
 crate-type = ["cdylib"]
 
 [dependencies]

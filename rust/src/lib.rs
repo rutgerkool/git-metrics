@@ -10,7 +10,7 @@ use crate::git_collector::GitCollector;
 use crate::models::Commit;
 
 #[pymodule]
-fn git_metrics(_py: Python, m: &PyModule) -> PyResult<()> {
+fn gitsect(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<RustGitCollector>()?;
     Ok(())
 }
