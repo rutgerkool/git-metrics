@@ -6,6 +6,12 @@ A tool for analyzing Git repositories to improve productivity and code quality t
 
 This project extracts metrics from Git history and provides actionable insights to improve code quality, reduce technical debt, and optimize development workflows. It uses a hybrid Python/Rust architecture for performance and extensibility.
 
+## Sample Output
+
+Here's what the Knowledge Distribution metric looks like when analyzing Facebook's [react-native](https://github.com/facebook/react-native) framework:
+
+![Knowledge Distribution Metrics Output](./img/metrics-output.png)
+
 ## Research-Backed Metrics
 
 The tool implements metrics based on established software engineering research:
@@ -51,7 +57,6 @@ The tool implements metrics based on established software engineering research:
 git clone https://github.com/yourusername/gitsect.git
 cd gitsect
 python build.py
-
 ```
 
 ## Usage
