@@ -2,12 +2,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use chrono::{Utc, TimeZone};
+use log::{debug, info};
 use rayon::prelude::*;
 use regex::Regex;
 
 use crate::error::{GitMetricsError, Result};
 use crate::models::{Commit, FileChange};
+
+const CACHE_TTL_SECONDS: u64 = 86400;
+const COMMIT_START_MARKER: &str = "COMMIT_START\n";
+const COMMIT_END_MARKER: &str = "COMMIT_END";
 
 pub struct GitCollector {
     repo_path: String,
@@ -44,15 +50,11 @@ impl GitCollector {
         let repo_abs_path = fs::canonicalize(&self.repo_path)
             .unwrap_or_else(|_| Path::new(&self.repo_path).to_path_buf());
         
-        let max_commits_str = match self.max_commits {
-            Some(n) => n.to_string(),
-            None => "all".to_string(),
-        };
+        let max_commits_str = self.max_commits
+            .map_or_else(|| "all".to_string(), |n| n.to_string());
         
-        let since_days_str = match self.since_days {
-            Some(n) => n.to_string(),
-            None => "all".to_string(),
-        };
+        let since_days_str = self.since_days
+            .map_or_else(|| "all".to_string(), |n| n.to_string());
         
         let patterns_str = if self.file_patterns.is_empty() {
             "all".to_string()
@@ -78,9 +80,11 @@ impl GitCollector {
     
     pub fn clear_cache(&self) -> Result<()> {
         if self.cache_dir.exists() {
-            fs::remove_dir_all(&self.cache_dir)?;
-            fs::create_dir_all(&self.cache_dir)?;
-            println!("Cache cleared successfully.");
+            fs::remove_dir_all(&self.cache_dir)
+                .map_err(|e| GitMetricsError::IoError(e))?;
+            fs::create_dir_all(&self.cache_dir)
+                .map_err(|e| GitMetricsError::IoError(e))?;
+            info!("Cache cleared successfully.");
         }
         Ok(())
     }
@@ -88,43 +92,51 @@ impl GitCollector {
     fn load_from_cache(&self) -> Result<Option<Vec<Commit>>> {
         let cache_file = self.get_cache_file_path()?;
         
-        if cache_file.exists() {
-            if let Ok(metadata) = fs::metadata(&cache_file) {
-                if let Ok(modified) = metadata.modified() {
-                    let now = SystemTime::now();
-                    if let Ok(duration) = now.duration_since(modified) {
-                        if duration.as_secs() < 86400 {
-                            match fs::read_to_string(&cache_file) {
-                                Ok(data) => {
-                                    match serde_json::from_str::<Vec<Commit>>(&data) {
-                                        Ok(commits) => {
-                                            println!("Loading git history from cache ({} commits)...", commits.len());
-                                            return Ok(Some(commits));
-                                        },
-                                        Err(e) => {
-                                            println!("Cache file corrupted, will rebuild: {}", e);
-                                        }
-                                    }
-                                },
-                                Err(e) => {
-                                    println!("Error reading cache file, will rebuild: {}", e);
-                                }
-                            }
-                        }
-                    }
-                }
+        if !cache_file.exists() {
+            debug!("Cache file doesn't exist");
+            return Ok(None);
+        }
+
+        let metadata = fs::metadata(&cache_file)
+            .map_err(|e| GitMetricsError::IoError(e))?;
+        
+        let modified = metadata.modified()
+            .map_err(|e| GitMetricsError::IoError(e))?;
+        
+        let now = SystemTime::now();
+        let duration = now.duration_since(modified)
+            .map_err(|_| GitMetricsError::Other("Cache file modification time is in the future".to_string()))?;
+        
+        if duration > Duration::from_secs(CACHE_TTL_SECONDS) {
+            debug!("Cache file too old (> 24h)");
+            return Ok(None);
+        }
+
+        let data = fs::read_to_string(&cache_file)
+            .map_err(|e| GitMetricsError::IoError(e))?;
+        
+        match serde_json::from_str::<Vec<Commit>>(&data) {
+            Ok(commits) => {
+                info!("Loading git history from cache ({} commits)...", commits.len());
+                Ok(Some(commits))
+            },
+            Err(e) => {
+                debug!("Cache file corrupted, will rebuild: {}", e);
+                Ok(None)
             }
         }
-        
-        Ok(None)
     }
     
     fn save_to_cache(&self, commits: &[Commit]) -> Result<()> {
         let cache_file = self.get_cache_file_path()?;
         
-        let json = serde_json::to_string(commits)?;
-        fs::write(&cache_file, json)?;
-        println!("Saved {} commits to cache.", commits.len());
+        let json = serde_json::to_string(commits)
+            .map_err(|e| GitMetricsError::SerializationError(e))?;
+        
+        fs::write(&cache_file, json)
+            .map_err(|e| GitMetricsError::IoError(e))?;
+        
+        info!("Saved {} commits to cache.", commits.len());
         
         Ok(())
     }
@@ -135,8 +147,10 @@ impl GitCollector {
         cmd.arg("--no-pager");
         cmd.args(args);
         
+        debug!("Running git command: git --no-pager {}", args.join(" "));
+        
         let output = cmd.output()
-            .map_err(|e| GitMetricsError::CommandError(format!("Failed to run git command: {}", e)))?;
+            .map_err(|e| GitMetricsError::Other(format!("Failed to execute git command: {}", e)))?;
         
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
@@ -154,63 +168,83 @@ impl GitCollector {
             return Ok(commits);
         }
         
+        self.log_collection_start();
+        
+        let commits = self.fetch_commits_batch()?;
+        info!("\nCollected {} commits", commits.len());
+        
+        self.save_to_cache(&commits)?;
+        
+        Ok(commits)
+    }
+    
+    fn log_collection_start(&self) {
         let pattern_str = if self.file_patterns.is_empty() {
             "all files".to_string()
         } else {
             format!("files matching: {}", self.file_patterns.join(", "))
         };
         
-        let _limit_msg = match (self.max_commits, self.since_days) {
+        match (self.max_commits, self.since_days) {
             (None, None) => {
-                println!("Collecting entire git history ({})...", pattern_str);
-                "all".to_string()
+                info!("Collecting entire git history ({})...", pattern_str);
             },
             (Some(max), Some(days)) => {
-                println!("Collecting git history (limited to {} commits from the last {} days, {})...", max, days, pattern_str);
-                format!("limited to {} commits from the last {} days", max, days)
+                info!("Collecting git history (limited to {} commits from the last {} days, {})...", 
+                      max, days, pattern_str);
             },
             (Some(max), None) => {
-                println!("Collecting git history (limited to {} commits, {})...", max, pattern_str);
-                format!("limited to {} commits", max)
+                info!("Collecting git history (limited to {} commits, {})...", 
+                      max, pattern_str);
             },
             (None, Some(days)) => {
-                println!("Collecting git history (from the last {} days, {})...", days, pattern_str);
-                format!("from the last {} days", days)
+                info!("Collecting git history (from the last {} days, {})...", 
+                      days, pattern_str);
             },
         };
-        
-        let commits = self.fetch_commits_batch()?;
-        println!("\nCollected {} commits", commits.len());
-        
-        self.save_to_cache(&commits)?;
-        
-        Ok(commits)
     }
 
     fn fetch_commits_batch(&self) -> Result<Vec<Commit>> {
-        let mut command = String::from("log --pretty=format:COMMIT_START%n%H%n%an%n%ad%n%s%n%b%nCOMMIT_END --name-status");
+        let base_args = [
+            "log",
+            "--pretty=format:COMMIT_START%n%H%n%an%n%ad%n%s%n%b%nCOMMIT_END",
+            "--name-status"
+        ];
         
-        if let Some(days) = self.since_days {
-            use chrono::{Utc, Duration};
-            let since_date = Utc::now() - Duration::days(days as i64);
-            let since_str = since_date.format("%Y-%m-%d").to_string();
-            command.push_str(&format!(" --since={}", since_str));
+        let owned_strings = self.build_commit_args();
+        let mut all_args = Vec::with_capacity(base_args.len() + owned_strings.len());
+        all_args.extend_from_slice(&base_args);
+        
+        for owned in &owned_strings {
+            all_args.push(owned.as_str());
         }
         
-        if let Some(max) = self.max_commits {
-            command.push_str(&format!(" -n {}", max));
-        }
-        
-        let args: Vec<&str> = command.split_whitespace().collect();
-        let output = self.run_git_command(&args)?;
+        let output = self.run_git_command(&all_args)?;
         self.parse_commit_data(&output)
     }
     
-    fn parse_commit_data(&self, data: &str) -> Result<Vec<Commit>> {
-        let raw_commits: Vec<&str> = data.split("COMMIT_START\n").skip(1).collect();
+    fn build_commit_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
         
+        if let Some(days) = self.since_days {
+            let since_date = Utc::now()
+                .checked_sub_signed(chrono::Duration::days(days as i64))
+                .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
+            
+            args.push(format!("--since={}", since_date.format("%Y-%m-%d")));
+        }
+        
+        if let Some(max) = self.max_commits {
+            args.push(format!("-n {}", max));
+        }
+        
+        args
+    }
+    
+    fn parse_commit_data(&self, data: &str) -> Result<Vec<Commit>> {
+        let raw_commits: Vec<&str> = data.split(COMMIT_START_MARKER).skip(1).collect();
         let total_commits = raw_commits.len();
-        println!("Found {} commits, processing in parallel...", total_commits);
+        info!("Found {} commits, processing in parallel...", total_commits);
         
         let has_file_filters = !self.file_patterns.is_empty();
         
@@ -219,11 +253,7 @@ impl GitCollector {
                 self.parse_single_commit(commit_data).ok()
             })
             .filter(|commit| {
-                if has_file_filters {
-                    !commit.files.is_empty()
-                } else {
-                    true
-                }
+                !has_file_filters || !commit.files.is_empty()
             })
             .collect();
         
@@ -239,10 +269,11 @@ impl GitCollector {
             if pattern.starts_with("*.") && filename.ends_with(&pattern[1..]) {
                 return true;
             }
-            else if pattern.contains("*") {
+            else if pattern.contains('*') {
                 let regex_pattern = pattern
                     .replace(".", "\\.")
                     .replace("*", ".*");
+                
                 if let Ok(regex) = Regex::new(&regex_pattern) {
                     if regex.is_match(filename) {
                         return true;
@@ -260,11 +291,16 @@ impl GitCollector {
     fn parse_single_commit(&self, commit_data: &str) -> Result<Commit> {
         let lines: Vec<&str> = commit_data.lines().collect();
         
-        let end_index = lines.iter().position(|&line| line == "COMMIT_END")
-            .ok_or_else(|| GitMetricsError::Other("Malformed commit data: no COMMIT_END marker".to_string()))?;
+        let end_index = lines.iter()
+            .position(|&line| line == COMMIT_END_MARKER)
+            .ok_or_else(|| GitMetricsError::Other(
+                "Malformed commit data: no COMMIT_END marker".to_string()
+            ))?;
         
         if lines.len() < 4 {
-            return Err(GitMetricsError::Other("Not enough lines in commit data".to_string()));
+            return Err(GitMetricsError::Other(
+                "Not enough lines in commit data".to_string()
+            ));
         }
         
         let commit_hash = lines[0].to_string();
@@ -272,38 +308,7 @@ impl GitCollector {
         let date = lines[2].to_string();
         let message = lines[3].to_string();
         
-        let mut files = Vec::new();
-        for i in 4..end_index {
-            let line = lines[i].trim();
-            if line.is_empty() {
-                continue;
-            }
-            
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 2 {
-                let status_str = parts[0].to_string();
-                let filename = parts[1].to_string();
-                
-                if !self.matches_file_pattern(&filename) {
-                    continue;
-                }
-                
-                let (additions, deletions) = if status_str.starts_with('A') {
-                    (1, 0)
-                } else if status_str.starts_with('D') {
-                    (0, 1)
-                } else {
-                    (1, 1)
-                };
-                
-                files.push(FileChange {
-                    filename,
-                    status: status_str,
-                    additions,
-                    deletions,
-                });
-            }
-        }
+        let files = self.parse_file_changes(&lines[4..end_index])?;
         
         Ok(Commit {
             hash: commit_hash,
@@ -314,75 +319,199 @@ impl GitCollector {
         })
     }
     
-    pub fn get_current_changes(&self) -> Result<HashMap<String, HashMap<String, u32>>> {
-        println!("Analyzing current changes...");
+    fn parse_file_changes(&self, file_lines: &[&str]) -> Result<Vec<FileChange>> {
+        let mut files = Vec::new();
         
-        let diff_args = vec!["diff", "--stat"];
-        let diff_output = self.run_git_command(&diff_args)?;
-        println!("Git diff output: {}", diff_output);
+        for line in file_lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            
+            let status_str = parts[0].to_string();
+            let filename = parts[1].to_string();
+            
+            if !self.matches_file_pattern(&filename) {
+                continue;
+            }
+            
+            let (additions, deletions) = self.status_to_change_count(&status_str);
+            
+            files.push(FileChange {
+                filename,
+                status: status_str,
+                additions,
+                deletions,
+            });
+        }
+        
+        Ok(files)
+    }
+    
+    fn status_to_change_count(&self, status: &str) -> (u32, u32) {
+        match status.chars().next() {
+            Some('A') => (1, 0),
+            Some('D') => (0, 1),
+            Some('M') | Some('R') | Some('C') => (1, 1),
+            _ => (0, 0),
+        }
+    }
+    
+    pub fn get_current_changes(&self) -> Result<HashMap<String, HashMap<String, u32>>> {
+        info!("Analyzing current changes...");
+        
+        let diff_output = self.run_git_command(&["diff", "--stat"])?;
+        debug!("Git diff output: {}", diff_output);
         
         let mut changes = HashMap::new();
         
         for line in diff_output.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            
-            if !line.contains("|") {
-                continue;
-            }
-            
-            let parts: Vec<&str> = line.split("|").collect();
-            if parts.len() == 2 {
-                let filename = parts[0].trim().to_string();
-                
-                if !self.matches_file_pattern(&filename) {
-                    continue;
-                }
-                
-                let stats = parts[1].trim().to_string();
-                
-                let mut insertions = 0;
-                let mut deletions = 0;
-                
-                if stats.contains("insertion") {
-                    let insertion_parts: Vec<&str> = stats.split("insertion").collect();
-                    insertions = insertion_parts[0].trim().parse::<u32>().unwrap_or(0);
-                }
-                
-                if stats.contains("deletion") {
-                    let deletion_parts: Vec<&str> = stats.split("deletion").collect();
-                    deletions = deletion_parts[0].trim().parse::<u32>().unwrap_or(0);
-                }
-                
-                if insertions == 0 && deletions == 0 {
-                    let symbols = stats.chars().collect::<Vec<char>>();
-                    insertions = symbols.iter().filter(|&&c| c == '+').count() as u32;
-                    deletions = symbols.iter().filter(|&&c| c == '-').count() as u32;
-                    
-                    if insertions == 0 && deletions == 0 {
-                        if let Some(first_space) = stats.find(' ') {
-                            if let Ok(total) = stats[..first_space].trim().parse::<u32>() {
-                                insertions = total / 2;
-                                deletions = total / 2;
-                                if total % 2 == 1 {
-                                    insertions += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                let mut file_changes = HashMap::new();
-                file_changes.insert("additions".to_string(), insertions);
-                file_changes.insert("deletions".to_string(), deletions);
-                file_changes.insert("total".to_string(), insertions + deletions);
-                
-                changes.insert(filename, file_changes);
+            if let Some(file_changes) = self.parse_diff_line(line) {
+                changes.insert(file_changes.0, file_changes.1);
             }
         }
         
-        println!("Analyzed {} changes", changes.len());
+        info!("Analyzed {} changes", changes.len());
         Ok(changes)
+    }
+    
+    fn parse_diff_line(&self, line: &str) -> Option<(String, HashMap<String, u32>)> {
+        let line = line.trim();
+        if line.is_empty() || !line.contains('|') {
+            return None;
+        }
+        
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        
+        let filename = parts[0].trim().to_string();
+        
+        if !self.matches_file_pattern(&filename) {
+            return None;
+        }
+        
+        let stats = parts[1].trim();
+        let (insertions, deletions) = self.parse_diff_stats(stats);
+        
+        let mut file_changes = HashMap::new();
+        file_changes.insert("additions".to_string(), insertions);
+        file_changes.insert("deletions".to_string(), deletions);
+        file_changes.insert("total".to_string(), insertions + deletions);
+        
+        Some((filename, file_changes))
+    }
+    
+    fn parse_diff_stats(&self, stats: &str) -> (u32, u32) {
+        let mut insertions = 0;
+        let mut deletions = 0;
+        
+        if stats.contains("insertion") {
+            if let Some(n) = stats.split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u32>().ok()) {
+                insertions = n;
+            }
+        }
+        
+        if stats.contains("deletion") {
+            if let Some(n) = stats.split("deletion")
+                .next()
+                .and_then(|s| s.trim().split_whitespace().next())
+                .and_then(|s| s.parse::<u32>().ok()) {
+                deletions = n;
+            }
+        }
+        
+        if insertions == 0 && deletions == 0 {
+            insertions = stats.chars().filter(|&c| c == '+').count() as u32;
+            deletions = stats.chars().filter(|&c| c == '-').count() as u32;
+        }
+        
+        if insertions == 0 && deletions == 0 {
+            if let Some(total) = stats.split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u32>().ok()) {
+                
+                insertions = total / 2;
+                deletions = total / 2;
+                if total % 2 == 1 {
+                    insertions += 1;
+                }
+            }
+        }
+        
+        (insertions, deletions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    
+    #[test]
+    fn test_status_to_change_count() {
+        let collector = GitCollector::new(".", None, None, Vec::new());
+        
+        assert_eq!(collector.status_to_change_count("A"), (1, 0));
+        assert_eq!(collector.status_to_change_count("D"), (0, 1));
+        assert_eq!(collector.status_to_change_count("M"), (1, 1));
+        assert_eq!(collector.status_to_change_count("R100"), (1, 1));
+        assert_eq!(collector.status_to_change_count("??"), (0, 0));
+    }
+    
+    #[test]
+    fn test_matches_file_pattern() {
+        let patterns = vec![
+            "*.rs".to_string(),
+            "src/*".to_string(),
+            "exact_file.txt".to_string()
+        ];
+        
+        let collector = GitCollector::new(".", None, None, patterns);
+        
+        assert!(collector.matches_file_pattern("main.rs"));
+        assert!(collector.matches_file_pattern("src/lib.rs"));
+        assert!(collector.matches_file_pattern("exact_file.txt"));
+        
+        assert!(!collector.matches_file_pattern("main.js"));
+        assert!(!collector.matches_file_pattern("test/main.rs"));
+        assert!(!collector.matches_file_pattern("exact_file_2.txt"));
+    }
+    
+    #[test]
+    fn test_parse_diff_stats() {
+        let collector = GitCollector::new(".", None, None, Vec::new());
+        
+        assert_eq!(collector.parse_diff_stats("5 insertions(+), 3 deletions(-)"), (5, 3));
+        assert_eq!(collector.parse_diff_stats("2 insertions(+)"), (2, 0));
+        assert_eq!(collector.parse_diff_stats("7 deletions(-)"), (0, 7));
+        assert_eq!(collector.parse_diff_stats("++--"), (2, 2));
+        assert_eq!(collector.parse_diff_stats("10 "), (5, 5));
+        assert_eq!(collector.parse_diff_stats("11 "), (6, 5));
+    }
+    
+    #[test]
+    fn test_get_cache_key() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().to_str().unwrap();
+        
+        let collector1 = GitCollector::new(repo_path, Some(10), None, Vec::new());
+        let collector2 = GitCollector::new(repo_path, Some(10), None, Vec::new());
+        let collector3 = GitCollector::new(repo_path, Some(20), None, Vec::new());
+        
+        let key1 = collector1.get_cache_key().unwrap();
+        let key2 = collector2.get_cache_key().unwrap();
+        let key3 = collector3.get_cache_key().unwrap();
+        
+        assert_eq!(key1, key2);
+        assert_ne!(key1, key3);
     }
 }
